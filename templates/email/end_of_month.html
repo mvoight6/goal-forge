@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<h2 style="margin:0 0 8px;color:#1e293b;font-size:18px;">{{ month_name }} — In the Books!</h2>
+<p style="margin:0 0 24px;color:#64748b;font-size:14px;">Here's how your month went.</p>
+
+<div style="background:#fdf4ff;border-left:4px solid #9333ea;padding:16px;border-radius:4px;margin-bottom:24px;">
+  <p style="margin:0;color:#7e22ce;line-height:1.6;">{{ summary_text }}</p>
+</div>
+
+{% if completed %}
+<h3 style="margin:0 0 12px;color:#1e293b;font-size:15px;">🏆 Accomplished This Month</h3>
+<ul style="margin:0 0 24px;padding-left:20px;color:#1e293b;font-size:14px;line-height:2;">
+  {% for g in completed %}
+  <li>{{ g.id }} — {{ g.name }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+{% if slipped %}
+<h3 style="margin:0 0 12px;color:#dc2626;font-size:15px;">📋 Carried Over / Slipped</h3>
+<ul style="margin:0 0 24px;padding-left:20px;color:#dc2626;font-size:14px;line-height:2;">
+  {% for g in slipped %}
+  <li>{{ g.id }} — {{ g.name }} <span style="color:#94a3b8;">(was due {{ g.due_date }})</span></li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

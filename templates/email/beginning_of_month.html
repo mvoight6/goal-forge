@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<h2 style="margin:0 0 8px;color:#1e293b;font-size:18px;">{{ month_name }} — Goal Plan</h2>
+<p style="margin:0 0 24px;color:#64748b;font-size:14px;">Here's what's on your plate this month.</p>
+
+<div style="background:#eff6ff;border-left:4px solid #2563eb;padding:16px;border-radius:4px;margin-bottom:24px;">
+  <p style="margin:0;color:#1e40af;line-height:1.6;">{{ plan_text }}</p>
+</div>
+
+{% if month_goals %}
+<h3 style="margin:0 0 12px;color:#1e293b;font-size:15px;">📋 Goals Due This Month</h3>
+<table width="100%" cellpadding="8" cellspacing="0" style="border-collapse:collapse;margin-bottom:24px;">
+  <tr style="background:#f1f5f9;">
+    <th style="text-align:left;color:#475569;font-size:13px;border-bottom:1px solid #e2e8f0;">Goal</th>
+    <th style="text-align:left;color:#475569;font-size:13px;border-bottom:1px solid #e2e8f0;">Due</th>
+    <th style="text-align:left;color:#475569;font-size:13px;border-bottom:1px solid #e2e8f0;">Status</th>
+  </tr>
+  {% for g in month_goals %}
+  <tr>
+    <td style="color:#1e293b;font-size:14px;border-bottom:1px solid #f1f5f9;">{{ g.id }} — {{ g.name }}</td>
+    <td style="color:#64748b;font-size:13px;border-bottom:1px solid #f1f5f9;">{{ g.due_date }}</td>
+    <td style="color:#64748b;font-size:13px;border-bottom:1px solid #f1f5f9;">{{ g.status }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,87 @@
+vault_path: "/home/matt/14TBShare/Obsidian Vault/Main Vault"
+goals_folder: "Goals"
+daily_folder: "Goals/Daily"
+inbox_folder: "Goals/_inbox"
+attachments_folder: "Goals/_inbox/attachments"
+database_path: "/opt/goal-forge/goals.db"
+log_path: "/opt/goal-forge/logs"
+
+# LLM Provider — choose one: anthropic | openrouter | ollama | vllm
+llm:
+  provider: "vllm"
+  anthropic:
+    api_key: "your-anthropic-api-key"
+    model: "claude-opus-4-6"
+  openrouter:
+    api_key: "your-openrouter-api-key"
+    model: "mistralai/mistral-7b-instruct"
+  ollama:
+    base_url: "http://localhost:11434"
+    model: "llama3"
+  vllm:
+    base_url: "http://localhost:8000/v1"
+    model: "cyankiwi/Qwen3.5-9B-AWQ-4bit"
+    api_key: "local"
+
+ntfy:
+  server: "https://notify.voight.net"   # Self-hosted ntfy — update port if different
+  topic: "MattsGoalTopic"
+
+email:
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  smtp_user: "matt@voight.net"
+  smtp_password: "your-app-password"   # Gmail App Password (not your account password)
+  from_address: "matt@voight.net"
+  to_address: "matt@voight.net"
+
+api:
+  host: "0.0.0.0"
+  port: 8742
+  secret_token: "changeme"            # Change this before first run!
+
+# Per-notification settings: enabled (on/off) and channel (push | email | both)
+notifications:
+  due_soon:
+    enabled: true
+    channel: push
+    days_before: 3
+  goal_overdue:
+    enabled: true
+    channel: push
+  daily_morning_briefing:
+    enabled: true
+    channel: push
+    time: "07:00"
+  weekly_digest:
+    enabled: true
+    channel: push
+    day: "Monday"
+    time: "07:30"
+  end_of_week_summary:
+    enabled: true
+    channel: email
+    day: "Friday"
+    time: "17:00"
+  inbox_review:
+    enabled: true
+    channel: push
+    day: "Sunday"
+    time: "09:00"
+  beginning_of_month:
+    enabled: true
+    channel: email
+    day_of_month: 1
+    time: "08:00"
+  end_of_month:
+    enabled: true
+    channel: email
+    day_of_month: 28
+    time: "17:00"
+
+scheduler:
+  scan_interval_minutes: 15
+
+capture:
+  max_image_size_mb: 20
+  allowed_image_types: [jpg, jpeg, png, webp, gif, heic]

@@ -1,0 +1,19 @@
+[Unit]
+Description=Goal Forge — self-hosted goal tracking system
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/goal-forge/main.py
+WorkingDirectory=/opt/goal-forge
+Restart=always
+RestartSec=5
+User=matt
+Group=matt
+EnvironmentFile=-/opt/goal-forge/.env
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=goal-forge
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+python-frontmatter
+anthropic
+fastapi
+uvicorn[standard]
+apscheduler
+httpx
+pyyaml
+sqlite-utils
+python-multipart
+aiosmtplib
+jinja2

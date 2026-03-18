@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<h2 style="margin:0 0 8px;color:#1e293b;font-size:18px;">End of Week Summary</h2>
+<p style="margin:0 0 24px;color:#64748b;font-size:14px;">Week of {{ week_start }} – {{ week_end }}</p>
+
+<div style="background:#f0fdf4;border-left:4px solid #16a34a;padding:16px;border-radius:4px;margin-bottom:24px;">
+  <p style="margin:0;color:#15803d;line-height:1.6;">{{ summary_text }}</p>
+</div>
+
+{% if completed %}
+<h3 style="margin:0 0 12px;color:#1e293b;font-size:15px;">✅ Completed This Week</h3>
+<ul style="margin:0 0 24px;padding-left:20px;color:#1e293b;font-size:14px;line-height:2;">
+  {% for g in completed %}
+  <li>{{ g.id }} — {{ g.name }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+{% if active %}
+<h3 style="margin:0 0 12px;color:#1e293b;font-size:15px;">🏃 Still In Progress</h3>
+<ul style="margin:0 0 24px;padding-left:20px;color:#1e293b;font-size:14px;line-height:2;">
+  {% for g in active %}
+  <li>{{ g.id }} — {{ g.name }} <span style="color:#64748b;">(due {{ g.due_date }})</span></li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

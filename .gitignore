@@ -1,0 +1,25 @@
+# Samba temp files
+.smb*
+.__smb*
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+
+# Logs & DB
+logs/
+*.log
+*.db
+
+# Secrets / local config overrides
+.env
+config.yaml
+
+# Claude
+.claude/

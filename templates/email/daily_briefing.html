@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block content %}
+<h2 style="margin:0 0 16px;color:#1e293b;font-size:18px;">Good morning! Here's your focus for today.</h2>
+
+<div style="background:#eff6ff;border-left:4px solid #2563eb;padding:16px;border-radius:4px;margin-bottom:24px;">
+  <p style="margin:0;color:#1e40af;line-height:1.6;">{{ briefing_text }}</p>
+</div>
+
+{% if due_today %}
+<h3 style="margin:0 0 12px;color:#1e293b;font-size:15px;">📅 Due Today</h3>
+<table width="100%" cellpadding="8" cellspacing="0" style="border-collapse:collapse;margin-bottom:24px;">
+  <tr style="background:#f1f5f9;">
+    <th style="text-align:left;color:#475569;font-size:13px;border-bottom:1px solid #e2e8f0;">Goal</th>
+    <th style="text-align:left;color:#475569;font-size:13px;border-bottom:1px solid #e2e8f0;">Status</th>
+  </tr>
+  {% for g in due_today %}
+  <tr>
+    <td style="color:#1e293b;font-size:14px;border-bottom:1px solid #f1f5f9;">{{ g.id }} — {{ g.name }}</td>
+    <td style="color:#64748b;font-size:13px;border-bottom:1px solid #f1f5f9;">{{ g.status }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% if overdue %}
+<h3 style="margin:0 0 12px;color:#dc2626;font-size:15px;">🚨 Overdue</h3>
+<table width="100%" cellpadding="8" cellspacing="0" style="border-collapse:collapse;margin-bottom:24px;">
+  {% for g in overdue %}
+  <tr>
+    <td style="color:#dc2626;font-size:14px;border-bottom:1px solid #f1f5f9;">{{ g.id }} — {{ g.name }}</td>
+    <td style="color:#94a3b8;font-size:13px;border-bottom:1px solid #f1f5f9;">{{ g.due_date }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+{% endblock %}

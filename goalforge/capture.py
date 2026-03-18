@@ -1,0 +1,298 @@
+"""
+Quick-capture endpoint — accepts text + images via multipart/form-data.
+Saves images to vault attachments folder, writes a .md capture file.
+Partial failures return HTTP 207 with per-image status.
+"""
+import logging
+from datetime import date
+from pathlib import Path
+from typing import Optional
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+from goalforge.config import config
+from goalforge import database, id_generator
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+bearer = HTTPBearer()
+
+MIME_TO_EXT = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/heic": ".heic",
+    "image/heif": ".heic",
+}
+
+
+def _auth(credentials: HTTPAuthorizationCredentials = Depends(bearer)):
+    if credentials.credentials != config.api.secret_token:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return credentials.credentials
+
+
+def _allowed_types() -> list[str]:
+    types = config.capture.allowed_image_types
+    if isinstance(types, list):
+        return [t.lower() for t in types]
+    return ["jpg", "jpeg", "png", "webp", "gif", "heic"]
+
+
+def _max_bytes() -> int:
+    mb = config.capture.max_image_size_mb
+    try:
+        return int(mb) * 1024 * 1024
+    except (TypeError, ValueError):
+        return 20 * 1024 * 1024
+
+
+def _validate_image(file: UploadFile) -> tuple[bool, str, str]:
+    """
+    Returns (ok, ext, error_message).
+    ext is the normalised extension to use when saving.
+    """
+    # Check MIME type
+    mime = (file.content_type or "").lower()
+    if mime in MIME_TO_EXT:
+        ext = MIME_TO_EXT[mime]
+    else:
+        # Fall back to filename extension
+        suffix = Path(file.filename or "").suffix.lower().lstrip(".")
+        allowed = _allowed_types()
+        if suffix not in allowed:
+            return False, "", f"Unsupported file type '{file.content_type or suffix}'. Accepted: {', '.join(allowed)}"
+        ext = f".{suffix}"
+
+    return True, ext, ""
+
+
+def _write_capture_md(
+    goal_id: str,
+    title: str,
+    description: str,
+    saved_images: list[str],
+) -> Path:
+    inbox_path = Path(config.vault_path) / config.inbox_folder
+    inbox_path.mkdir(parents=True, exist_ok=True)
+
+    safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in title)[:60]
+    file_path = inbox_path / f"{goal_id} {safe_title}.md"
+
+    image_embeds = "\n".join(f"![[{img}]]" for img in saved_images)
+    image_wikilinks = "\n".join(f"- [[Goals/_inbox/attachments/{img}]]" for img in saved_images)
+
+    content = f"""---
+id: {goal_id}
+name: "{title}"
+status: Draft
+created_date: {date.today().isoformat()}
+tags: [capture]
+---
+
+## Note
+{description or title}
+"""
+
+    if saved_images:
+        content += f"""
+## Images
+{image_embeds}
+
+## Attachments
+{image_wikilinks}
+"""
+
+    file_path.write_text(content, encoding="utf-8")
+    logger.info("Capture written: %s", file_path.name)
+    return file_path
+
+
+@router.post("/capture")
+async def capture(
+    title: str = Form(...),
+    description: Optional[str] = Form(""),
+    images: list[UploadFile] = File(default=[]),
+    token: str = Depends(_auth),
+):
+    db = database.get_db()
+    goal_id = id_generator.next_id(db)
+
+    attachments_path = Path(config.vault_path) / config.attachments_folder
+    attachments_path.mkdir(parents=True, exist_ok=True)
+
+    max_bytes = _max_bytes()
+    saved_images: list[str] = []
+    image_results: list[dict] = []
+    any_failed = False
+
+    for n, file in enumerate(images, start=1):
+        ok, ext, error = _validate_image(file)
+        if not ok:
+            image_results.append({"filename": file.filename, "status": "rejected", "error": error})
+            any_failed = True
+            continue
+
+        filename = f"{goal_id}_{n}{ext}"
+        dest = attachments_path / filename
+
+        try:
+            data = await file.read()
+            if len(data) > max_bytes:
+                mb_limit = max_bytes // (1024 * 1024)
+                image_results.append({
+                    "filename": file.filename,
+                    "status": "rejected",
+                    "error": f"File exceeds {mb_limit}MB limit ({len(data) // (1024*1024)}MB)",
+                })
+                any_failed = True
+                continue
+
+            dest.write_bytes(data)
+            saved_images.append(filename)
+            image_results.append({"filename": file.filename, "saved_as": filename, "status": "saved"})
+            logger.info("Saved image %s", filename)
+
+        except Exception as e:
+            logger.error("Failed to save image %s: %s", file.filename, e)
+            image_results.append({"filename": file.filename, "status": "error", "error": str(e)})
+            any_failed = True
+
+    # Write the capture .md file
+    md_path = _write_capture_md(goal_id, title, description or "", saved_images)
+
+    # Upsert into DB as a Draft capture
+    database.upsert_goal({
+        "id": goal_id,
+        "name": title,
+        "status": "Draft",
+        "created_date": date.today().isoformat(),
+        "file_path": str(md_path),
+    })
+
+    result = {
+        "id": goal_id,
+        "status": "captured",
+        "images_saved": saved_images,
+        "image_results": image_results,
+    }
+
+    # 207 Multi-Status if any image failed
+    if any_failed and saved_images:
+        return JSONResponse(status_code=207, content=result)
+
+    return result
+
+
+@router.get("/goals")
+def list_goals_api(
+    status: Optional[str] = None,
+    horizon: Optional[str] = None,
+    is_milestone: Optional[bool] = None,
+    full_only: bool = False,
+    token: str = Depends(_auth),
+):
+    """List goals with optional filtering."""
+    filters = {}
+    if status:
+        filters["status"] = status
+    if horizon:
+        filters["horizon"] = horizon
+    if is_milestone is not None:
+        filters["is_milestone"] = is_milestone
+
+    if full_only:
+        return database.get_full_goals(filters)
+    return database.get_all_goals(filters)
+
+
+@router.get("/goals/{goal_id}")
+def get_goal_api(goal_id: str, token: str = Depends(_auth)):
+    goal = database.get_goal(goal_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail=f"Goal {goal_id} not found")
+    children = database.get_children(goal_id, recursive=False)
+    ancestors = database.get_ancestors(goal_id)
+    goal["children"] = children
+    goal["ancestors"] = ancestors
+    return goal
+
+
+@router.post("/goals/{goal_id}/plan")
+def plan_goal_api(goal_id: str, token: str = Depends(_auth)):
+    """Trigger AI planning for a goal. Returns list of created child goals."""
+    from goalforge.planner import plan_goal
+    try:
+        children = plan_goal(goal_id)
+        return {"goal_id": goal_id, "created": children}
+    except Exception as e:
+        logger.error("Plan failed for %s: %s", goal_id, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/goals/{goal_id}")
+def update_goal_api(goal_id: str, updates: dict, token: str = Depends(_auth)):
+    """Update one or more fields on a goal — writes through to the vault file."""
+    from goalforge.vault_tools import update_goal_field
+    for field, value in updates.items():
+        try:
+            update_goal_field(goal_id, field, value)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    return database.get_goal(goal_id)
+
+
+@router.delete("/goals/{goal_id}")
+def delete_goal_api(goal_id: str, token: str = Depends(_auth)):
+    """Delete a goal file and its DB record."""
+    from goalforge.vault_tools import delete_goal
+    try:
+        return delete_goal(goal_id, confirmed=True)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/inbox")
+def list_inbox(token: str = Depends(_auth)):
+    """List all Draft captures."""
+    return database.get_draft_captures()
+
+
+@router.post("/goals/create")
+def create_goal_api(body: dict, token: str = Depends(_auth)):
+    """Create a new goal via vault_tools."""
+    from goalforge.vault_tools import create_goal
+    try:
+        return create_goal(
+            name=body["name"],
+            description=body.get("description", ""),
+            horizon=body.get("horizon", "Monthly"),
+            due_date=body.get("due_date"),
+            category=body.get("category", ""),
+            parent_goal_id=body.get("parent_goal_id"),
+            is_milestone=body.get("is_milestone", False),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/goals/{goal_id}/promote")
+def promote_goal_api(goal_id: str, token: str = Depends(_auth)):
+    from goalforge.vault_tools import promote_to_full_goal
+    try:
+        return promote_to_full_goal(goal_id)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/goals/{goal_id}/demote")
+def demote_goal_api(goal_id: str, token: str = Depends(_auth)):
+    from goalforge.vault_tools import demote_to_milestone
+    try:
+        return demote_to_milestone(goal_id)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
