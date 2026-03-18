@@ -5,20 +5,21 @@ Self-hosted goal tracking system that bridges your Obsidian vault with AI-powere
 ## Features
 
 - **Obsidian-native** — goals live as Markdown files with YAML frontmatter, synced via Syncthing
+- **Daily Goals** — Google Keep-style daily checklist with reordering, move-to-tomorrow, and quick-add
 - **AI Planning** — generate child goals/milestones using your local vLLM, Ollama, Claude, or OpenRouter
-- **Push Notifications** — ntfy.sh push + Gmail SMTP email for 8 notification types
-- **Interactive Chat** — LLM-powered coach with full vault read/write access
-- **Mobile PWA** — installable on Android via Chrome; works over Tailscale
+- **Interactive Chat** — LLM-powered coach with full vault read/write access and daily goal awareness
+- **Push Notifications** — self-hosted ntfy push + Gmail SMTP email for 8 notification types
+- **Mobile PWA** — installable on Android via Chrome; accessible over HTTPS via Caddy reverse proxy
 
 ---
 
 ## Prerequisites
 
 - Python 3.11+ on Linux
-- Obsidian vault accessible on the server (Syncthing or local)
-- [ntfy](https://ntfy.sh) running locally (or ntfy.sh cloud)
+- Obsidian vault accessible on the server (Syncthing or local mount)
+- [ntfy](https://ntfy.sh) for push notifications (self-hosted or ntfy.sh cloud)
 - Gmail account with App Password (for email notifications)
-- [Tailscale](https://tailscale.com) on server + Android (for remote access)
+- A domain name + Caddy for HTTPS remote access (optional but recommended)
 
 ---
 
@@ -27,39 +28,45 @@ Self-hosted goal tracking system that bridges your Obsidian vault with AI-powere
 ### 1. Clone and install dependencies
 
 ```bash
-git clone <your-repo-url> /opt/goal-forge
+git clone https://github.com/mvoight6/goal-forge /opt/goal-forge
 cd /opt/goal-forge
 pip3 install -r requirements.txt
 ```
 
 ### 2. Configure
 
-Edit `config.yaml` — the file is pre-populated with sensible defaults. Required changes:
+Copy the example config and edit it:
+
+```bash
+cp config.yaml.example config.yaml
+```
+
+Required changes:
 
 ```yaml
-vault_path: "/home/matt/14TBShare/Obsidian Vault/Main Vault"  # already set
+vault_path: "/path/to/your/obsidian/vault"
 api:
   secret_token: "your-secret-token-here"   # CHANGE THIS
 email:
-  smtp_password: "your-gmail-app-password"  # see below
+  smtp_password: "your-gmail-app-password"
 ```
 
-### 3. Create the Obsidian Goals folder
+### 3. Vault folder structure
 
-Make sure this folder exists in your vault:
+Goal Forge will create these automatically, but you can pre-create them:
+
 ```
 <vault_root>/Goals/
 <vault_root>/Goals/_inbox/
 <vault_root>/Goals/_inbox/attachments/
+<vault_root>/Goals/Daily/
 ```
-
-Or Goal Forge will create them automatically on first scan.
 
 ### 4. Create the database directory
 
 ```bash
 sudo mkdir -p /opt/goal-forge/logs
-sudo chown matt:matt /opt/goal-forge /opt/goal-forge/logs
+sudo chown $USER:$USER /opt/goal-forge /opt/goal-forge/logs
 ```
 
 ### 5. Test it
@@ -69,16 +76,17 @@ cd /opt/goal-forge
 python3 main.py
 ```
 
-Open `http://localhost:8742` in a browser. Enter your `secret_token` to log in.
+Open `http://localhost:8742` in a browser and enter your `secret_token` to log in.
 
 ---
 
 ## Systemd Service
 
-To run Goal Forge as a background service:
+To run Goal Forge as a background service that starts on boot:
 
 ```bash
 sudo cp goal-forge.service /etc/systemd/system/
+# Edit the service file if your code lives somewhere other than /opt/goal-forge
 sudo systemctl daemon-reload
 sudo systemctl enable goal-forge
 sudo systemctl start goal-forge
@@ -88,96 +96,132 @@ sudo systemctl status goal-forge
 View logs:
 ```bash
 journalctl -u goal-forge -f
-# or
-tail -f /opt/goal-forge/logs/goalforge.log
 ```
 
 ---
 
-## Gmail App Password Setup
+## HTTPS Remote Access (Caddy + Let's Encrypt)
 
-Required for email notifications. App Passwords bypass 2FA safely.
+To access Goal Forge securely from outside your home network, use Caddy as a reverse proxy with automatic HTTPS.
 
-1. Go to [myaccount.google.com](https://myaccount.google.com) → **Security**
-2. Ensure **2-Step Verification** is enabled
-3. Search for **"App Passwords"** in the search bar
-4. Select app: **Mail**, device: **Other** → name it "Goal Forge"
-5. Copy the 16-character password into `config.yaml`:
-   ```yaml
-   email:
-     smtp_password: "abcd efgh ijkl mnop"  # paste without spaces
-   ```
+### 1. Install Caddy
+
+```bash
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update && sudo apt install caddy
+```
+
+### 2. Configure Caddyfile
+
+Edit `/etc/caddy/Caddyfile`:
+
+```
+goals.yourdomain.com {
+    reverse_proxy localhost:8742
+}
+
+notify.yourdomain.com {
+    reverse_proxy localhost:2586
+}
+```
+
+```bash
+sudo systemctl reload caddy
+```
+
+### 3. Port forward on your router
+
+Forward TCP ports **80** and **443** to your server's local IP. Caddy handles Let's Encrypt certificates automatically.
+
+### 4. Install the PWA on Android
+
+1. Open `https://goals.yourdomain.com` in Chrome
+2. Tap **⋮ menu → Add to Home screen**
+3. Goal Forge installs as a standalone app
 
 ---
 
 ## Self-hosted ntfy Setup
 
-ntfy is the push notification server. Run it on the same machine as Goal Forge:
+ntfy provides push notifications to your Android device.
 
-### Using Docker (easiest)
+### Install
 
 ```bash
-docker run -p 80:80 -v /opt/ntfy:/etc/ntfy binwiederhier/ntfy serve
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://archive.heckel.io/apt/pubkey.txt | sudo gpg --dearmor -o /etc/apt/keyrings/archive.heckel.io.gpg
+sudo sh -c "echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/archive.heckel.io.gpg] https://archive.heckel.io/apt debian main' > /etc/apt/sources.list.d/archive.heckel.io.list"
+sudo apt update && sudo apt install ntfy
 ```
 
-### Or install directly
+### Configure
+
+Edit `/etc/ntfy/server.yml`:
+
+```yaml
+listen-http: ":2586"
+base-url: "https://notify.yourdomain.com"
+```
 
 ```bash
-sudo apt install ntfy
 sudo systemctl enable ntfy --now
 ```
 
-Then update `config.yaml`:
+### Update config.yaml
+
 ```yaml
 ntfy:
-  server: "http://localhost:80"
-  topic: "MattsGoalTopic"
+  server: "https://notify.yourdomain.com"
+  topic: "YourTopic"
 ```
 
-Subscribe to notifications on your Android: install the [ntfy app](https://play.google.com/store/apps/details?id=io.heckel.ntfy) and subscribe to `http://<tailscale-ip>/MattsGoalTopic`.
+### Subscribe on Android
+
+Install the [ntfy app](https://play.google.com/store/apps/details?id=io.heckel.ntfy), tap **+**, choose **Use another server**, and enter your ntfy URL and topic.
 
 ---
 
-## Tailscale Setup
+## Gmail App Password Setup
 
-Tailscale creates a private network between your server and Android — no port forwarding needed.
+Required for email notifications.
 
-### On the server
-
-```bash
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
-```
-
-### On Android
-
-1. Install [Tailscale](https://play.google.com/store/apps/details?id=com.tailscale.ipn.android) from the Play Store
-2. Sign in with the same account used on the server
-3. Both devices should appear in your Tailscale admin panel
-
-### Find your Tailscale IP
-
-```bash
-tailscale ip -4
-# e.g. 100.64.1.23
-```
-
-The PWA URL will be: `http://100.64.1.23:8742`
-
-**For a cleaner URL** — enable MagicDNS in [Tailscale admin](https://login.tailscale.com/admin/dns) and use:
-`http://goalforge:8742`
-
-### Install the PWA on Android
-
-1. Open `http://<tailscale-ip>:8742` in Chrome
-2. Tap the **⋮ menu → Add to Home screen**
-3. Goal Forge installs as a standalone app
+1. Go to [myaccount.google.com](https://myaccount.google.com) → **Security**
+2. Ensure **2-Step Verification** is enabled
+3. Search for **"App Passwords"**
+4. Create a password for "Goal Forge" and copy it into `config.yaml`:
+   ```yaml
+   email:
+     smtp_password: "abcdefghijklmnop"
+   ```
 
 ---
 
 ## Using Goal Forge
 
-### Goal file format
+### PWA Views
+
+| View | Description |
+|------|-------------|
+| **Dashboard** | Overview — Today's Goals, due this week, overdue, active goals |
+| **Daily** | Daily checklist — last 7 days + any future days with items |
+| **Goals** | Full goal hierarchy — collapsible tree, filter by status/horizon |
+| **Capture** | Quick capture — text + images saved as Draft goals |
+| **More** | Chat, Inbox, Config, Jobs, Logs |
+
+### Daily Goals
+
+Daily Goals are a simple day-by-day checklist (like Google Keep), separate from your strategic goal hierarchy.
+
+- Items are stored in `Goals/Daily/` in your vault
+- Each day has a parent goal (`Daily Goals YYYY-MM-DD`) with items as children
+- Check items off as you complete them — status persists through restarts
+- Reorder items within a day using the ▲/▼ buttons
+- Move incomplete items to tomorrow with the **→ Tmrw** button
+- Ask the chat AI to add daily items: *"Add 'call dentist' to today's list"*
+
+### Goal File Format
 
 Place `.md` files in `<vault_root>/Goals/` with this frontmatter:
 
@@ -232,35 +276,36 @@ Change `config.yaml` → `llm.provider` to switch providers:
 
 ```
 goal-forge/
-├── main.py               # Entry point
-├── config.yaml           # All configuration
+├── main.py                # Entry point
+├── config.yaml.example    # Config template (copy to config.yaml)
 ├── requirements.txt
-├── goal-forge.service    # Systemd unit
+├── goal-forge.service     # Systemd unit
 ├── goalforge/
-│   ├── config.py         # Config loader
-│   ├── database.py       # SQLite layer
-│   ├── scanner.py        # Vault scanner
-│   ├── planner.py        # AI goal planning
-│   ├── notifier.py       # Push + email notifications
-│   ├── scheduler.py      # APScheduler jobs
-│   ├── capture.py        # Quick capture + goals API
-│   ├── interactive.py    # Chat mode
-│   ├── vault_tools.py    # Vault read/write for LLM
-│   ├── dashboard.py      # Dashboard.md generator
-│   ├── config_api.py     # Config endpoints
-│   ├── logs_api.py       # Log endpoints
-│   ├── id_generator.py   # GF- ID generation
-│   └── llm/              # LLM provider abstraction
-├── pwa/                  # Mobile PWA
-└── templates/email/      # Jinja2 email templates
+│   ├── config.py          # Config loader (hot-reload)
+│   ├── database.py        # SQLite layer
+│   ├── scanner.py         # Vault scanner (Goals/ + Goals/Daily/)
+│   ├── planner.py         # AI goal planning
+│   ├── notifier.py        # Push + email notifications
+│   ├── scheduler.py       # APScheduler jobs
+│   ├── capture.py         # Quick capture + goals API
+│   ├── daily_api.py       # Daily Goals API
+│   ├── interactive.py     # Chat mode + LLM tool calling
+│   ├── vault_tools.py     # Vault read/write for LLM
+│   ├── dashboard.py       # Dashboard.md generator
+│   ├── config_api.py      # Config endpoints
+│   ├── logs_api.py        # Log endpoints
+│   ├── id_generator.py    # GF- ID generation
+│   └── llm/               # LLM provider abstraction
+├── pwa/                   # Mobile PWA (vanilla JS)
+└── templates/email/       # Jinja2 email templates
 ```
 
 ---
 
 ## Notification Types
 
-| Type | When | Channel |
-|------|------|---------|
+| Type | When | Default Channel |
+|------|------|----------------|
 | Due Soon | Daily at 8am | Push |
 | Overdue | Daily at 8am | Push |
 | Daily Briefing | Configurable time | Push |
@@ -270,27 +315,29 @@ goal-forge/
 | Beginning of Month | 1st of month | Email |
 | End of Month | Last day of month | Email |
 
-All types can be enabled/disabled and channel (push/email/both) configured from the PWA Config screen.
+All types can be enabled/disabled and routed to push, email, or both from the PWA Config screen.
 
 ---
 
 ## Troubleshooting
 
-**App won't connect from Android:**
-- Ensure Tailscale is running on both devices and both are signed in to the same account
-- Check `tailscale status` on the server — both devices should show as "connected"
-- Try pinging the server from Android: `ping <tailscale-ip>` in a terminal app
+**App won't connect remotely:**
+- Verify Caddy is running: `sudo systemctl status caddy`
+- Check DNS resolves to your public IP: `nslookup goals.yourdomain.com`
+- Ensure ports 80 and 443 are forwarded on your router
 
 **Notifications not arriving:**
-- Check ntfy is running: `curl http://localhost:80/MattsGoalTopic/json`
-- Verify ntfy app on Android is subscribed to the correct topic and server URL
-- Check `/opt/goal-forge/logs/goalforge_notifier.log`
+- Test ntfy: `curl https://notify.yourdomain.com/YourTopic -d "test"`
+- Verify the ntfy app is subscribed to the correct server URL and topic
+- Check logs: `journalctl -u ntfy`
 
 **LLM not responding:**
 - Verify vLLM is running: `curl http://localhost:8000/v1/models`
 - Check the model name in config matches what vLLM is serving
-- Check `/opt/goal-forge/logs/goalforge_llm_vllm.log`
 
 **Goals not appearing after adding .md files:**
 - Trigger a manual scan from the PWA Jobs screen, or run `python3 main.py scan`
-- Ensure files have `name:` in frontmatter (required field)
+- Ensure files have a `name:` field in frontmatter (required)
+
+**Checkboxes resetting after restart:**
+- Ensure you're on the latest version — earlier versions didn't write status back to vault files
