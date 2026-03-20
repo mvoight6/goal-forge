@@ -27,7 +27,6 @@ LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 _MODULE_LOGGERS = [
-    "goalforge.scanner",
     "goalforge.database",
     "goalforge.planner",
     "goalforge.notifier",
@@ -35,7 +34,6 @@ _MODULE_LOGGERS = [
     "goalforge.vault_tools",
     "goalforge.scheduler",
     "goalforge.capture",
-    "goalforge.dashboard",
     "goalforge.config_api",
     "goalforge.logs_api",
     "goalforge.llm.anthropic",

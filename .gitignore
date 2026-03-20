@@ -20,6 +20,7 @@ logs/
 # Secrets / local config overrides
 .env
 config.yaml
+config.yaml.bak
 
 # Claude
 .claude/

@@ -1,16 +1,12 @@
 """
 AI goal planner — generates 3-5 child goals for any goal using the active LLM provider.
-Writes new .md files, updates the parent's Child Goals table, triggers a scanner run.
+Creates child goals directly in the database.
 """
 import json
 import logging
 from datetime import date
-from pathlib import Path
 from typing import Optional
 
-import frontmatter
-
-from goalforge.config import config
 from goalforge import database, id_generator
 from goalforge.llm.factory import get_provider
 
@@ -47,128 +43,39 @@ Today's date: {date.today().isoformat()}
 Generate 3-5 child goals or milestones for this goal."""
 
 
-def _goal_body(child: dict, parent: dict) -> str:
-    parent_name = parent.get("name", "")
-    parent_id = parent.get("id", "")
-    return f"""## Summary
-| Field       | Value                          |
-|-------------|--------------------------------|
-| Goal        | {child['name']}                |
-| Due         | {child.get('due_date', '')}    |
-| Horizon     | {child.get('horizon', '')}     |
-| Status      | Backlog                        |
-| Parent Goal | {parent_name} ({parent_id})    |
-
-## Description
-{child.get('description', '')}
-
-## Child Goals
-| ID | Name | Type | Due Date | Status |
-|----|------|------|----------|--------|
-"""
-
-
-def _write_child_file(child: dict, parent: dict) -> Path:
-    """Write a new .md file for a child goal. Returns the path."""
+def _create_child_goal(child: dict, parent: dict) -> str:
+    """Create a child goal record directly in the database. Returns the new goal ID."""
     db = database.get_db()
     new_id = id_generator.next_id(db)
     child["id"] = new_id
 
-    goals_path = Path(config.vault_path) / config.goals_folder
-    goals_path.mkdir(parents=True, exist_ok=True)
-    safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in child["name"])[:60]
-    file_path = goals_path / f"{new_id} {safe_name}.md"
-
-    post = frontmatter.Post(
-        content=_goal_body(child, parent),
-        id=new_id,
-        name=child["name"],
-        status="Backlog",
-        horizon=child.get("horizon", ""),
-        due_date=child.get("due_date", ""),
-        parent_goal_id=parent["id"],
-        depth=parent.get("depth", 0) + 1,
-        is_milestone=child.get("is_milestone", False),
-        category=parent.get("category", ""),
-        created_date=date.today().isoformat(),
-        notify_before_days=child.get("notify_before_days", 3),
-        tags=["goal"],
-    )
-
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(frontmatter.dumps(post))
-
-    logger.info("Created child goal file: %s", file_path.name)
-    return file_path
-
-
-def _update_parent_child_table(parent: dict, children: list[dict]):
-    """Rewrite the ## Child Goals section in the parent's .md file."""
-    file_path = parent.get("file_path")
-    if not file_path or not Path(file_path).exists():
-        logger.warning("Parent file not found for Child Goals update: %s", file_path)
-        return
-
-    db_children = database.get_children(parent["id"], recursive=False)
-
-    rows = ""
-    for c in db_children:
-        child_type = "Milestone" if c.get("is_milestone") else "Full Goal"
-        rows += f"| {c['id']} | {c['name']} | {child_type} | {c.get('due_date', '')} | {c.get('status', '')} |\n"
-
-    section = f"""## Child Goals
-| ID | Name | Type | Due Date | Status |
-|----|------|------|----------|--------|
-{rows}"""
-
-    post = frontmatter.load(file_path)
-    content = post.content
-
-    if "## Child Goals" in content:
-        # Replace existing section up to next ## or EOF
-        import re
-        content = re.sub(
-            r"## Child Goals\n.*?(?=\n## |\Z)",
-            section + "\n",
-            content,
-            flags=re.DOTALL,
-        )
-    else:
-        content = content.rstrip() + "\n\n" + section + "\n"
-
-    post.content = content
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(frontmatter.dumps(post))
-    logger.info("Updated Child Goals table in %s", Path(file_path).name)
+    goal_dict = {
+        "id": new_id,
+        "name": child["name"],
+        "description": child.get("description", ""),
+        "status": "Backlog",
+        "horizon": child.get("horizon", ""),
+        "due_date": child.get("due_date") or None,
+        "parent_goal_id": parent["id"],
+        "depth": parent.get("depth", 0) + 1,
+        "is_milestone": child.get("is_milestone", False),
+        "category": parent.get("category", ""),
+        "created_date": date.today().isoformat(),
+        "notify_before_days": child.get("notify_before_days", 3),
+        "tags": '["goal"]',
+    }
+    database.upsert_goal(goal_dict)
+    logger.info("Created child goal: %s %s", new_id, child["name"])
+    return new_id
 
 
 def promote_to_full_goal(goal_id: str):
-    """
-    Promote a milestone to a full goal:
-    - Set is_milestone: false in frontmatter and DB
-    - Regenerate parent's Child Goals table
-    """
+    """Promote a milestone to a full goal (is_milestone = false)."""
     goal = database.get_goal(goal_id)
     if not goal:
         raise ValueError(f"Goal {goal_id} not found")
 
-    # Update DB
     database.set_is_milestone(goal_id, False)
-
-    # Update frontmatter
-    file_path = goal.get("file_path")
-    if file_path and Path(file_path).exists():
-        post = frontmatter.load(file_path)
-        post["is_milestone"] = False
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(frontmatter.dumps(post))
-
-    # Regenerate parent's child table
-    if goal.get("parent_goal_id"):
-        parent = database.get_goal(goal["parent_goal_id"])
-        if parent:
-            _update_parent_child_table(parent, [])
-
     logger.info("Promoted %s to full goal", goal_id)
 
 
@@ -214,31 +121,10 @@ def plan_goal(goal_id: str) -> list[dict]:
     created = []
     for child in children:
         try:
-            file_path = _write_child_file(child, goal)
-            child["file_path"] = str(file_path)
-
-            # Upsert into DB
-            db_record = {
-                **child,
-                "parent_goal_id": goal["id"],
-                "depth": goal.get("depth", 0) + 1,
-                "status": "Backlog",
-                "created_date": date.today().isoformat(),
-            }
-            database.upsert_goal(db_record)
-            created.append(child)
+            _create_child_goal(child, goal)
+            created.append(database.get_goal(child["id"]))
         except Exception as e:
             logger.error("Failed to create child goal '%s': %s", child.get("name"), e)
-
-    # Update parent's Child Goals table
-    _update_parent_child_table(goal, created)
-
-    # Trigger a scan to pick up new files
-    try:
-        from goalforge import scanner
-        scanner.run_scan()
-    except Exception as e:
-        logger.warning("Post-plan scan failed: %s", e)
 
     logger.info("Created %d child goals for %s", len(created), goal_id)
     return created
