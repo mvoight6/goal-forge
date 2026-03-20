@@ -14,5 +14,13 @@
       "type": "image/svg+xml",
       "purpose": "any maskable"
     }
+  ],
+  "shortcuts": [
+    {
+      "name": "Quick Capture",
+      "short_name": "Capture",
+      "description": "Quickly capture a new goal idea",
+      "url": "/#capture"
+    }
   ]
 }

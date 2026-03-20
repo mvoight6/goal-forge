@@ -1,4 +1,4 @@
-const CACHE_NAME = 'goalforge-v1';
+const CACHE_NAME = 'goalforge-v4';
 const SHELL_FILES = [
   '/',
   '/style.css',

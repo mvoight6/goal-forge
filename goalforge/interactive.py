@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
-from goalforge.config import config
+from goalforge.config import config, get
 from goalforge.llm.factory import get_provider
 from goalforge.llm.base import ToolCall
 from datetime import date
@@ -22,6 +22,58 @@ router = APIRouter()
 bearer = HTTPBearer()
 
 _sessions: dict[str, list[dict]] = {}
+
+_COMPACT_KEEP_RECENT = 4   # messages kept verbatim during compaction
+_CHARS_PER_TOKEN = 3.5
+
+
+def _estimate_tokens(system: str, messages: list[dict]) -> int:
+    """Rough token count: total characters / 3.5."""
+    total = len(system)
+    for msg in messages:
+        total += len(str(msg.get("content") or ""))
+        if "tool_calls" in msg:
+            total += len(json.dumps(msg["tool_calls"]))
+    return int(total / _CHARS_PER_TOKEN)
+
+
+def _trim_tool_results(history: list[dict]) -> None:
+    """Stub out tool result bodies — they are only needed for the immediate next
+    LLM turn and become dead weight after the assistant replies."""
+    for msg in history:
+        if msg.get("role") == "tool" and len(msg.get("content", "")) > 50:
+            msg["content"] = '{"trimmed":true}'
+
+
+def _compact_history(history: list[dict], provider, system: str) -> bool:
+    """Summarise the older portion of history in-place using the LLM.
+    Returns True if compaction was performed."""
+    if len(history) <= _COMPACT_KEEP_RECENT:
+        return False
+
+    to_summarize = history[:-_COMPACT_KEEP_RECENT]
+    recent = history[-_COMPACT_KEEP_RECENT:]
+
+    summary_prompt = (
+        "Summarise our conversation so far in a few concise paragraphs. "
+        "Cover: goals discussed, any goals created or updated, decisions made, "
+        "and open threads or next steps. Be specific but brief."
+    )
+    try:
+        summary = provider.chat(
+            system=system,
+            messages=to_summarize + [{"role": "user", "content": summary_prompt}],
+        )
+    except Exception as e:
+        logger.warning("Context compaction failed: %s", e)
+        return False
+
+    history.clear()
+    history.append({"role": "user", "content": "[Earlier conversation — summarised for context]"})
+    history.append({"role": "assistant", "content": f"[Conversation summary: {summary}]"})
+    history.extend(recent)
+    logger.info("Context compacted — history reduced to %d messages", len(history))
+    return True
 
 SYSTEM_PROMPT_TEMPLATE = """You are Joe MacMillan — visionary, driven, and genuinely invested in the person you're working with.
 
@@ -37,9 +89,9 @@ Keep responses concise — they appear on a mobile screen.
 
 There are two distinct types of goals:
 
-**Strategic Goals** — created with `create_goal`. These live in the Goals/ vault folder and represent longer-term objectives (Weekly, Monthly, Quarterly, Yearly, Life horizon). Use these for anything that is a real project or ambition.
+**Strategic Goals** — created with `create_goal`. These represent longer-term objectives (Weekly, Monthly, Quarterly, Yearly, Life horizon). Use these for anything that is a real project or ambition.
 
-**Daily Goals** — created with `create_daily_item`. These are simple checklist items for a specific day (like Google Keep). They live in the Daily/ vault folder. Use these when the user says things like "add to my daily goals", "add to today's list", "remind me to do X today/tomorrow", or anything that is a short task for a specific day.
+**Daily Goals** — created with `create_daily_item`. These are simple checklist items for a specific day (like Google Keep). Use these when the user says things like "add to my daily goals", "add to today's list", "remind me to do X today/tomorrow", or anything that is a short task for a specific day.
 
 Today's date is {today}. Tomorrow is {tomorrow}. Always use the correct ISO date (YYYY-MM-DD) based on these values."""
 
@@ -106,7 +158,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "update_goal_field",
-            "description": "Update a single field on a goal (name, status, horizon, due_date, category, notify_before_days)",
+            "description": "Update a single field on a goal (name, status, horizon, due_date, category, notify_before_days, description)",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -161,7 +213,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "create_goal",
-            "description": "Create a new goal file in the vault",
+            "description": "Create a new goal",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -210,36 +262,12 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "search_vault",
-            "description": "Full-text search across all vault markdown files",
+            "name": "search_goals",
+            "description": "Search goals by name or description",
             "parameters": {
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
                 "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_note",
-            "description": "Read any vault file by relative path",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string"}},
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_notes",
-            "description": "List files in a vault folder",
-            "parameters": {
-                "type": "object",
-                "properties": {"folder": {"type": "string"}},
-                "required": ["folder"],
             },
         },
     },
@@ -259,9 +287,7 @@ TOOL_DISPATCH = {
     "create_goal":         lambda a: vault_tools.create_goal(**a),
     "create_daily_item":   lambda a: daily_api.add_daily_item_for_date(**a),
     "delete_goal":         lambda a: vault_tools.delete_goal(**_remap(a, "goal_id", "goal_id")),
-    "search_vault":        lambda a: vault_tools.search_vault(**a),
-    "read_note":           lambda a: vault_tools.read_note(**a),
-    "list_notes":          lambda a: vault_tools.list_notes(**a),
+    "search_goals":        lambda a: vault_tools.search_goals(**a),
 }
 
 
@@ -309,13 +335,16 @@ def chat(session_id: str, message: str) -> dict:
     history.append({"role": "user", "content": message})
 
     provider = get_provider()
+    system = _build_system_prompt()
+    context_limit = int(get("llm.context_limit") or 32768)
     executed_tools = []
     reply = ""
+    compacted = False
 
     MAX_TOOL_ROUNDS = 10
     for _ in range(MAX_TOOL_ROUNDS):
         content, tool_calls = provider.chat_with_tools(
-            system=_build_system_prompt(),
+            system=system,
             messages=history,
             tools=TOOL_SCHEMAS,
         )
@@ -360,7 +389,18 @@ def chat(session_id: str, message: str) -> dict:
         reply = "I ran into an issue completing that request. Try rephrasing or breaking it into smaller steps."
         history.append({"role": "assistant", "content": reply})
 
-    return {"reply": reply, "tool_calls": executed_tools}
+    # Trim tool result bodies now that they've been consumed, then compact if needed
+    _trim_tool_results(history)
+    if _estimate_tokens(system, history) >= context_limit * 0.80:
+        compacted = _compact_history(history, provider, system)
+
+    return {
+        "reply": reply,
+        "tool_calls": executed_tools,
+        "context_tokens": _estimate_tokens(system, history),
+        "context_limit": context_limit,
+        "compacted": compacted,
+    }
 
 
 def clear_session(session_id: str):
@@ -380,6 +420,9 @@ class ChatResponse(BaseModel):
     session_id: str
     reply: str
     tool_calls: list
+    context_tokens: int = 0
+    context_limit: int = 32768
+    compacted: bool = False
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -391,6 +434,9 @@ def post_chat(req: ChatRequest, token: str = Depends(_auth)):
             session_id=session_id,
             reply=result["reply"],
             tool_calls=result["tool_calls"],
+            context_tokens=result["context_tokens"],
+            context_limit=result["context_limit"],
+            compacted=result["compacted"],
         )
     except Exception as e:
         logger.error("Chat error: %s", e)

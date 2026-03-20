@@ -74,12 +74,42 @@ def _ensure_schema(db: sqlite_utils.Database):
             UNIQUE(notification_type, period_key)
         )
     """)
-    # Migration: add sort_order column if it doesn't exist
-    try:
-        db.execute("ALTER TABLE goals ADD COLUMN sort_order INTEGER DEFAULT 0")
-        db.conn.commit()
-    except Exception:
-        pass  # Column already exists
+    # Migrations: add columns if they don't exist
+    for col, definition in [
+        ("sort_order", "INTEGER DEFAULT 0"),
+        ("description", "TEXT DEFAULT ''"),
+        ("tags", "TEXT DEFAULT '[]'"),
+        ("updated_at", "TIMESTAMP"),
+        ("progress_notes", "TEXT DEFAULT ''"),
+    ]:
+        try:
+            db.execute(f"ALTER TABLE goals ADD COLUMN {col} {definition}")
+            db.conn.commit()
+        except Exception:
+            pass  # Column already exists
+
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+            filename TEXT NOT NULL,
+            mime_type TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Trigger updates updated_at on data changes, but NOT when updated_at itself changes
+    # (scoping to specific columns prevents infinite recursion)
+    db.execute("""
+        CREATE TRIGGER IF NOT EXISTS goals_updated
+        AFTER UPDATE OF name, status, horizon, due_date, parent_goal_id, depth,
+            is_milestone, category, notify_before_days, description, tags, sort_order, progress_notes
+        ON goals
+        BEGIN
+            UPDATE goals SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+        END
+    """)
+
     db.conn.commit()
     logger.debug("Schema ensured.")
 
@@ -105,16 +135,20 @@ def upsert_goal(goal_dict: dict):
     parent_id = goal_dict.get("parent_goal_id") or None
     depth = _compute_depth(db, parent_id)
 
-    # Preserve existing sort_order on re-scan; use provided value or 0 for new goals
-    existing = db.execute("SELECT sort_order FROM goals WHERE id = ?", [goal_id]).fetchone()
+    # Preserve existing sort_order, description, tags, progress_notes on update
+    existing = db.execute("SELECT sort_order, description, tags, progress_notes FROM goals WHERE id = ?", [goal_id]).fetchone()
     sort_order = existing[0] if existing else goal_dict.get("sort_order", 0)
+    description = goal_dict.get("description") if goal_dict.get("description") is not None else (existing[1] if existing else "")
+    tags = goal_dict.get("tags") if goal_dict.get("tags") is not None else (existing[2] if existing else "[]")
+    progress_notes = goal_dict.get("progress_notes") if goal_dict.get("progress_notes") is not None else (existing[3] if existing else "")
 
     db.conn.execute(
         """
         INSERT OR REPLACE INTO goals
             (id, name, status, horizon, due_date, parent_goal_id, depth, is_milestone,
-             category, notify_before_days, created_date, file_path, last_scanned, notification_sent, sort_order)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             category, notify_before_days, created_date, file_path, last_scanned, notification_sent,
+             sort_order, description, tags, progress_notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             goal_id,
@@ -132,6 +166,9 @@ def upsert_goal(goal_dict: dict):
             datetime.utcnow().isoformat(),
             goal_dict.get("notification_sent", 0),
             sort_order,
+            description,
+            tags,
+            progress_notes,
         ],
     )
     db.conn.commit()
@@ -211,6 +248,13 @@ def get_root_goals() -> list[dict]:
     return [dict(zip(cols, r)) for r in rows]
 
 
+_DAILY_CHECKLIST_CLAUSE = (
+    "name NOT LIKE 'Daily Goals ____-__-__' "
+    "AND (parent_goal_id IS NULL OR parent_goal_id NOT IN "
+    "(SELECT id FROM goals WHERE name LIKE 'Daily Goals ____-__-__'))"
+)
+
+
 def get_full_goals(filters: dict = None) -> list[dict]:
     """All goals where is_milestone = 0. Optional filter dict with keys: status, horizon, category."""
     db = get_db()
@@ -232,6 +276,8 @@ def get_full_goals(filters: dict = None) -> list[dict]:
             else:
                 where.append("parent_goal_id = ?")
                 params.append(filters["parent_goal_id"])
+        if filters.get("exclude_daily_checklist"):
+            where.append(_DAILY_CHECKLIST_CLAUSE)
     sql = f"SELECT * FROM goals WHERE {' AND '.join(where)} ORDER BY due_date ASC NULLS LAST"
     rows = db.execute(sql, params).fetchall()
     cols = [d[0] for d in db.execute("SELECT * FROM goals LIMIT 0").description]
@@ -262,6 +308,8 @@ def get_all_goals(filters: dict = None) -> list[dict]:
             else:
                 where.append("parent_goal_id = ?")
                 params.append(filters["parent_goal_id"])
+        if filters.get("exclude_daily_checklist"):
+            where.append(_DAILY_CHECKLIST_CLAUSE)
     sql = f"SELECT * FROM goals WHERE {' AND '.join(where)} ORDER BY due_date ASC NULLS LAST"
     rows = db.execute(sql, params).fetchall()
     cols = [d[0] for d in db.execute("SELECT * FROM goals LIMIT 0").description]
@@ -390,7 +438,8 @@ def update_field(goal_id: str, field: str, value):
     """Update a single field on a goal row."""
     allowed = {
         "name", "status", "horizon", "due_date", "parent_goal_id",
-        "is_milestone", "category", "notify_before_days"
+        "is_milestone", "category", "notify_before_days", "description", "tags", "sort_order",
+        "progress_notes",
     }
     if field not in allowed:
         raise ValueError(f"Field '{field}' is not updatable via this function.")
@@ -413,10 +462,41 @@ def delete_goal(goal_id: str):
     db.conn.commit()
 
 
+def search_goals(query: str) -> list[dict]:
+    """Full-text search across goal name and description."""
+    db = get_db()
+    pattern = f"%{query}%"
+    rows = db.execute(
+        "SELECT * FROM goals WHERE name LIKE ? OR description LIKE ? ORDER BY updated_at DESC LIMIT 50",
+        [pattern, pattern]
+    ).fetchall()
+    cols = [d[0] for d in db.execute("SELECT * FROM goals LIMIT 0").description]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def upsert_attachment(goal_id: str, filename: str, mime_type: str):
+    db = get_db()
+    db.execute(
+        "INSERT OR IGNORE INTO attachments (goal_id, filename, mime_type) VALUES (?, ?, ?)",
+        [goal_id, filename, mime_type]
+    )
+    db.conn.commit()
+
+
+def get_attachments(goal_id: str) -> list[dict]:
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, goal_id, filename, mime_type, created_at FROM attachments WHERE goal_id = ? ORDER BY created_at ASC",
+        [goal_id]
+    ).fetchall()
+    cols = ["id", "goal_id", "filename", "mime_type", "created_at"]
+    return [dict(zip(cols, r)) for r in rows]
+
+
 def get_recently_completed(limit: int = 5) -> list[dict]:
     db = get_db()
     rows = db.execute(
-        "SELECT * FROM goals WHERE status = 'Completed' ORDER BY last_scanned DESC LIMIT ?",
+        "SELECT * FROM goals WHERE status = 'Completed' ORDER BY updated_at DESC LIMIT ?",
         [limit]
     ).fetchall()
     cols = [d[0] for d in db.execute("SELECT * FROM goals LIMIT 0").description]

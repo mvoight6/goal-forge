@@ -31,6 +31,13 @@ async function api(method, path, body = null, isForm = false) {
 // ---------------------------------------------------------------------------
 // Toast
 // ---------------------------------------------------------------------------
+// Returns YYYY-MM-DD in LOCAL time (avoids UTC-offset date-flip bug)
+function localDateStr(daysOffset = 0) {
+  const d = new Date();
+  if (daysOffset) d.setDate(d.getDate() + daysOffset);
+  return d.toLocaleDateString('en-CA'); // en-CA always gives YYYY-MM-DD
+}
+
 let _toastTimer;
 function toast(msg, duration = 2500) {
   const el = document.getElementById('toast');
@@ -52,10 +59,17 @@ function register(name, fn) { routes[name] = fn; }
 function navigate(name, params = {}) {
   const fn = routes[name];
   if (!fn) return;
+  // Clean up TV mode when leaving
+  if (window._tvInterval) { clearInterval(window._tvInterval); window._tvInterval = null; }
+  if (window._tvClockInterval) { clearInterval(window._tvClockInterval); window._tvClockInterval = null; }
+  if (name !== 'tv') { const _navEl = document.getElementById('nav'); if (_navEl) _navEl.style.display = ''; }
   if (currentView) _navStack.push({ name: currentView, params: window._currentParams || {} });
   currentView = name;
   window._currentParams = params;
-  document.getElementById('main-content').innerHTML = '';
+  const mc = document.getElementById('main-content');
+  mc.removeAttribute('style');
+  mc.className = '';
+  mc.innerHTML = '';
   document.querySelectorAll('.nav-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.view === name);
   });
@@ -63,6 +77,10 @@ function navigate(name, params = {}) {
 }
 
 function goBack(fallback = 'dashboard') {
+  // Clean up TV mode when leaving
+  if (window._tvInterval) { clearInterval(window._tvInterval); window._tvInterval = null; }
+  if (window._tvClockInterval) { clearInterval(window._tvClockInterval); window._tvClockInterval = null; }
+  const _navEl2 = document.getElementById('nav'); if (_navEl2) _navEl2.style.display = '';
   const prev = _navStack.pop();
   if (prev) {
     currentView = null; // allow navigate() to push if needed — but skip pushing again
@@ -70,7 +88,10 @@ function goBack(fallback = 'dashboard') {
     if (fn) {
       currentView = prev.name;
       window._currentParams = prev.params;
-      document.getElementById('main-content').innerHTML = '';
+      const mc = document.getElementById('main-content');
+      mc.removeAttribute('style');
+      mc.className = '';
+      mc.innerHTML = '';
       document.querySelectorAll('.nav-btn').forEach(b => {
         b.classList.toggle('active', b.dataset.view === prev.name);
       });
@@ -116,10 +137,10 @@ function buildShell() {
         <span class="icon">📋</span>Daily
       </button>
       <button class="nav-btn" data-view="goals" onclick="navigate('goals')">
-        <span class="icon">🎯</span>Goals
+        <span class="icon">🎯</span>Strategic
       </button>
-      <button class="nav-btn" data-view="capture" onclick="navigate('capture')">
-        <span class="icon">📸</span>Capture
+      <button class="nav-btn" data-view="chat" onclick="navigate('chat')">
+        <span class="icon">💬</span>Chat
       </button>
       <button class="nav-btn" data-view="more" onclick="navigate('more')">
         <span class="icon">⋯</span>More
@@ -142,12 +163,12 @@ register('dashboard', async () => {
       api('GET', '/daily?days=1'),
     ]);
 
-    const today = new Date().toISOString().split('T')[0];
-    const in7 = new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0];
-    const dueThisWeek = goals.filter(g => g.due_date && g.due_date >= today && g.due_date <= in7 && g.status !== 'Completed' && g.category !== 'Daily');
-    const overdue = goals.filter(g => g.due_date && g.due_date < today && g.status !== 'Completed' && g.category !== 'Daily');
-    const rootActive = goals.filter(g => g.depth === 0 && g.status === 'Active' && g.category !== 'Daily');
-    const rootBacklog = goals.filter(g => g.depth === 0 && g.status === 'Backlog' && !g.is_milestone && g.category !== 'Daily');
+    const today = localDateStr();
+    const in7 = localDateStr(7);
+    const dueThisWeek = goals.filter(g => g.due_date && g.due_date >= today && g.due_date <= in7 && g.status !== 'Completed');
+    const overdue = goals.filter(g => g.due_date && g.due_date < today && g.status !== 'Completed');
+    const rootActive = goals.filter(g => g.depth === 0 && g.status === 'Active');
+    const rootBacklog = goals.filter(g => g.depth === 0 && g.status === 'Backlog' && !g.is_milestone);
 
     const todayDaily = dailyData[0] || { date: today, items: [] };
     const dailyItems = todayDaily.items || [];
@@ -173,8 +194,8 @@ register('dashboard', async () => {
 
       ${overdue.length ? `<div class="section-header">🚨 Overdue</div>${overdue.map(g => goalCard(g)).join('')}` : ''}
 
-      <div class="section-header">🌳 Active Root Goals</div>
-      ${rootActive.length ? rootActive.map(g => goalCard(g)).join('') : '<p style="color:var(--text-muted);font-size:14px;">No active root goals.</p>'}
+      <div class="section-header">🌳 Active Strategic Goals</div>
+      ${rootActive.length ? rootActive.map(g => goalCard(g)).join('') : '<p style="color:var(--text-muted);font-size:14px;">No active strategic goals.</p>'}
 
       ${rootBacklog.length ? `
         <div class="section-header">📋 Backlog</div>
@@ -237,9 +258,9 @@ function renderDailyChecklist(items, dateStr, compact = false) {
   const rows = items.map((item, idx) => {
     const done = item.status === 'Completed';
     const nameStyle = done ? 'text-decoration:line-through;color:var(--text-muted);' : '';
-    const tomorrow = new Date(dateStr);
+    const tomorrow = new Date(dateStr + 'T12:00:00'); // noon avoids DST-edge date shift
     tomorrow.setDate(tomorrow.getDate() + 1);
-    const tomorrowStr = tomorrow.toISOString().split('T')[0];
+    const tomorrowStr = tomorrow.toLocaleDateString('en-CA');
     const isFirst = idx === 0;
     const isLast = idx === items.length - 1;
 
@@ -253,7 +274,7 @@ function renderDailyChecklist(items, dateStr, compact = false) {
 
     return `<div class="daily-item" data-item-id="${item.id}" data-date="${dateStr}" style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);">
       <input type="checkbox" ${done ? 'checked' : ''} onchange="toggleDailyItem('${item.id}', this.checked)" style="flex-shrink:0;width:18px;height:18px;cursor:pointer;">
-      <span style="flex:1;font-size:14px;${nameStyle}">${escHtml(item.name)}</span>
+      <span id="daily-name-${item.id}" style="flex:1;font-size:14px;${nameStyle}cursor:text;" onclick="startEditDailyItem('${item.id}')" title="Click to edit">${escHtml(item.name)}</span>
       ${!done && !compact ? `<button class="btn btn-sm btn-ghost" style="font-size:11px;padding:2px 6px;" onclick="moveDailyItem('${item.id}','${tomorrowStr}')">→ Tmrw</button>` : ''}
       ${!compact ? `<button class="btn btn-sm btn-ghost" style="font-size:11px;padding:2px 6px;color:var(--danger);" onclick="removeDailyItem('${item.id}')">✕</button>` : ''}
       ${reorderBtns}
@@ -344,6 +365,52 @@ window.removeDailyItem = async function(id) {
   } catch (e) { toast(`Error: ${e.message}`); }
 };
 
+window.startEditDailyItem = function(id) {
+  const span = document.getElementById('daily-name-' + id);
+  if (!span) return;
+
+  const originalName = span.textContent;
+  const originalStyle = span.getAttribute('style');
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = originalName;
+  input.style.cssText = 'flex:1;font-size:14px;padding:2px 6px;background:var(--surface2);border:1px solid var(--primary);border-radius:4px;outline:none;color:var(--text);min-width:0;';
+  span.parentNode.replaceChild(input, span);
+  input.focus();
+  input.select();
+
+  let committed = false;
+
+  async function commit() {
+    if (committed) return;
+    committed = true;
+    const newName = input.value.trim();
+    if (!newName || newName === originalName) {
+      input.parentNode.replaceChild(span, input);
+      return;
+    }
+    try {
+      await api('PATCH', `/goals/${id}`, { name: newName });
+      span.textContent = newName; // update span before restoring
+      input.parentNode.replaceChild(span, input);
+    } catch (e) {
+      toast(`Error: ${e.message}`);
+      committed = false;
+      input.parentNode.replaceChild(span, input);
+    }
+  }
+
+  input.addEventListener('blur', commit);
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    if (e.key === 'Escape') {
+      committed = true; // suppress blur→commit
+      input.parentNode.replaceChild(span, input);
+    }
+  });
+};
+
 // ---------------------------------------------------------------------------
 // Daily view
 // ---------------------------------------------------------------------------
@@ -354,8 +421,8 @@ register('daily', async () => {
   try {
     const days = await api('GET', '/daily?days=7');
 
-    const today = new Date().toISOString().split('T')[0];
-    const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
+    const today = localDateStr();
+    const tomorrow = localDateStr(1);
 
     // Build HTML newest-first (days array is oldest-first, so reverse)
     const sections = [...days].reverse().map(day => {
@@ -437,7 +504,7 @@ window.toggleGoalNode = function(id) {
 
 register('goals', async () => {
   const el = document.getElementById('main-content');
-  el.innerHTML = `<div class="page-header"><span class="page-title">🎯 Goals</span></div><div class="spinner"></div>`;
+  el.innerHTML = `<div class="page-header"><span class="page-title">🎯 Strategic Goals</span></div><div class="spinner"></div>`;
 
   let filter = { status: null, horizon: null };
 
@@ -450,7 +517,7 @@ register('goals', async () => {
 
       el.innerHTML = `
         <div class="page-header">
-          <span class="page-title">🎯 Goals</span>
+          <span class="page-title">🎯 Strategic Goals</span>
           <button class="btn btn-sm btn-primary" onclick="navigate('create-goal')">+ New</button>
         </div>
         <div class="filter-row">
@@ -517,6 +584,18 @@ register('goal-detail', async ({ id }) => {
           <tr><td style="color:var(--text-muted);padding:3px 8px 3px 0;">Type</td><td>${goal.is_milestone ? 'Milestone' : 'Full Goal'}</td></tr>
           <tr><td style="color:var(--text-muted);padding:3px 8px 3px 0;">Depth</td><td>${goal.depth}</td></tr>
         </table>
+        ${goal.description ? `<p style="font-size:14px;color:var(--text);margin-top:12px;line-height:1.5;">${escHtml(goal.description)}</p>` : ''}
+      </div>
+
+      <div class="section-header">📝 Progress Notes</div>
+      <div class="card" style="padding:10px 14px;margin-bottom:16px;">
+        <textarea
+          id="goal-notes-${goal.id}"
+          class="notes-textarea"
+          placeholder="Log your progress here… (auto-saves on blur)"
+          onblur="saveProgressNotes('${goal.id}')"
+        >${escHtml(goal.progress_notes || '')}</textarea>
+        <div id="notes-status-${goal.id}" style="font-size:11px;color:var(--text-muted);text-align:right;margin-top:4px;min-height:14px;"></div>
       </div>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
@@ -544,7 +623,7 @@ register('goal-detail', async ({ id }) => {
       ` : ''}
 
       ${subGoals.length ? `
-        <div class="section-header">🎯 Sub-Goals</div>
+        <div class="section-header">🎯 Strategic Sub-Goals</div>
         ${subGoals.map(g => goalCard(g)).join('')}
       ` : ''}
 
@@ -570,6 +649,23 @@ window.updateStatus = async function(id, status) {
     toast(`Status → ${status}`);
     navigate('goal-detail', { id });
   } catch (e) { toast(`Error: ${e.message}`); }
+};
+
+window.saveProgressNotes = async function(id) {
+  const ta = document.getElementById('goal-notes-' + id);
+  const statusEl = document.getElementById('notes-status-' + id);
+  if (!ta) return;
+  try {
+    if (statusEl) statusEl.textContent = 'Saving…';
+    await api('PATCH', `/goals/${id}`, { progress_notes: ta.value });
+    if (statusEl) {
+      statusEl.textContent = 'Saved ✓';
+      setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 2000);
+    }
+  } catch (e) {
+    if (statusEl) statusEl.textContent = 'Error saving';
+    toast(`Error saving notes: ${e.message}`);
+  }
 };
 
 window.toggleMilestone = async function(id, done) {
@@ -653,6 +749,7 @@ register('edit-goal', async ({ id }) => {
         <span class="page-title">Edit Goal</span>
       </div>
       <div class="form-group"><label class="form-label">Name *</label><input type="text" id="eg-name" value="${escHtml(goal.name || '')}"></div>
+      <div class="form-group"><label class="form-label">Description</label><textarea id="eg-desc" placeholder="Describe your goal…">${escHtml(goal.description || '')}</textarea></div>
       <div class="form-group"><label class="form-label">Horizon</label>
         <select id="eg-horizon">${['Daily','Weekly','Monthly','Quarterly','Yearly','Life'].map(h=>`<option ${goal.horizon===h?'selected':''}>${h}</option>`).join('')}</select>
       </div>
@@ -662,6 +759,7 @@ register('edit-goal', async ({ id }) => {
       <div class="form-group"><label class="form-label">Due Date</label><input type="date" id="eg-due" value="${goal.due_date || ''}"></div>
       <div class="form-group"><label class="form-label">Category</label><input type="text" id="eg-cat" value="${escHtml(goal.category || '')}"></div>
       <div class="form-group"><label class="form-label">Notify Before (days)</label><input type="number" id="eg-notify" value="${goal.notify_before_days ?? 3}" min="0"></div>
+      <div class="form-group"><label class="form-label">📝 Progress Notes</label><textarea id="eg-notes" placeholder="Log your progress…" style="min-height:140px;">${escHtml(goal.progress_notes || '')}</textarea></div>
       <button class="btn btn-primary btn-full" onclick="submitEditGoal('${goal.id}')">Save Changes</button>
       <button class="btn btn-full" style="margin-top:8px;background:var(--danger);color:#fff;border:none;" onclick="deleteGoal('${goal.id}', '${escHtml(goal.name)}')">Delete Goal</button>
     `;
@@ -675,11 +773,13 @@ window.submitEditGoal = async function(id) {
   if (!name) { toast('Name is required'); return; }
   const updates = {
     name,
+    description: document.getElementById('eg-desc').value,
     horizon: document.getElementById('eg-horizon').value,
     status: document.getElementById('eg-status').value,
     due_date: document.getElementById('eg-due').value || null,
     category: document.getElementById('eg-cat').value,
     notify_before_days: parseInt(document.getElementById('eg-notify').value) || 3,
+    progress_notes: document.getElementById('eg-notes').value,
   };
   try {
     await api('PATCH', `/goals/${id}`, updates);
@@ -689,7 +789,7 @@ window.submitEditGoal = async function(id) {
 };
 
 window.deleteGoal = async function(id, name) {
-  if (!confirm(`Delete "${name}"?\n\nThis will remove the goal file from your vault and cannot be undone.`)) return;
+  if (!confirm(`Delete "${name}"?\n\nThis cannot be undone.`)) return;
   try {
     await api('DELETE', `/goals/${id}`);
     toast('Goal deleted');
@@ -821,27 +921,72 @@ window.discardCapture = async function(id) {
 // Chat view
 // ---------------------------------------------------------------------------
 register('chat', () => {
-  const el = document.getElementById('main-content');
-  el.innerHTML = `
-    <div class="page-header">
+  const mc = document.getElementById('main-content');
+  // Inline styles own the layout — not subject to CSS caching
+  mc.style.cssText = 'padding:0;overflow:hidden;display:flex;flex-direction:column;padding-bottom:0;';
+  mc.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 16px 8px;flex-shrink:0;">
       <span class="page-title">💬 Chat</span>
       <button class="btn btn-sm btn-ghost" onclick="clearChat()">Clear</button>
     </div>
-    <div id="chat-messages"></div>
-    <div id="chat-input-row">
-      <input type="text" id="chat-input" placeholder="Ask anything about your goals…" onkeydown="if(event.key==='Enter')sendChat()">
-      <button class="btn btn-primary btn-sm" onclick="sendChat()">Send</button>
+    <div id="chat-messages" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:12px;padding:4px 16px 12px;"></div>
+    <div id="chat-bottom" style="flex-shrink:0;background:var(--bg);border-top:1px solid var(--border);padding:10px 16px 72px;">
+      <div style="display:flex;gap:8px;">
+        <input type="text" id="chat-input" style="flex:1;" placeholder="Ask anything about your goals…" onkeydown="if(event.key==='Enter')sendChat()">
+        <button class="btn btn-primary btn-sm" onclick="sendChat()">Send</button>
+      </div>
+      <div id="ctx-bar-wrap" style="display:none;margin-top:8px;">
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);margin-bottom:3px;">
+          <span>Context window</span><span id="ctx-pct-label">0%</span>
+        </div>
+        <div style="background:var(--border);border-radius:4px;height:4px;overflow:hidden;">
+          <div id="ctx-bar" style="height:100%;width:0%;background:#22c55e;border-radius:4px;transition:width 0.4s,background 0.4s;"></div>
+        </div>
+      </div>
     </div>
   `;
   window._chatSessionId = window._chatSessionId || '';
+  window._chatMessagesHTML = window._chatMessagesHTML || '';
+
+  // Restore previous conversation if one exists
+  if (window._chatSessionId && window._chatMessagesHTML) {
+    document.getElementById('chat-messages').innerHTML = window._chatMessagesHTML;
+    if (window._chatLastTokens) updateContextBar(window._chatLastTokens, window._chatLastLimit || 32768);
+    requestAnimationFrame(() => {
+      const msgs = document.getElementById('chat-messages');
+      if (msgs) msgs.scrollTop = msgs.scrollHeight;
+    });
+  }
 });
+
+function updateContextBar(tokens, limit) {
+  const wrap = document.getElementById('ctx-bar-wrap');
+  const bar = document.getElementById('ctx-bar');
+  const label = document.getElementById('ctx-pct-label');
+  if (!wrap || !bar || !label) return;
+  const pct = Math.min(100, Math.round((tokens / limit) * 100));
+  wrap.style.display = 'block';
+  bar.style.width = pct + '%';
+  label.textContent = pct + '%';
+  bar.style.background = pct >= 90 ? '#dc2626' : pct >= 80 ? '#f97316' : pct >= 60 ? '#d97706' : '#22c55e';
+}
 
 window.clearChat = async function() {
   if (window._chatSessionId) {
     await api('DELETE', `/chat/${window._chatSessionId}`).catch(() => {});
     window._chatSessionId = '';
   }
-  document.getElementById('chat-messages').innerHTML = '';
+  window._chatMessagesHTML = '';
+  window._chatLastTokens = 0;
+  window._chatLastLimit = 32768;
+  const msgs = document.getElementById('chat-messages');
+  if (msgs) msgs.innerHTML = '';
+  const wrap = document.getElementById('ctx-bar-wrap');
+  if (wrap) wrap.style.display = 'none';
+  const bar = document.getElementById('ctx-bar');
+  if (bar) { bar.style.width = '0%'; bar.style.background = '#22c55e'; }
+  const label = document.getElementById('ctx-pct-label');
+  if (label) label.textContent = '0%';
 };
 
 window.sendChat = async function() {
@@ -866,8 +1011,18 @@ window.sendChat = async function() {
       <div>${escHtml(res.reply)}</div>
       ${res.tool_calls?.length ? `<div class="chat-tool-note">🔧 ${res.tool_calls.map(t => t.tool).join(', ')}</div>` : ''}
     `;
+    if (res.context_tokens && res.context_limit) {
+      updateContextBar(res.context_tokens, res.context_limit);
+      window._chatLastTokens = res.context_tokens;
+      window._chatLastLimit = res.context_limit;
+    }
+    if (res.compacted) {
+      msgs.innerHTML += `<div style="text-align:center;font-size:11px;color:var(--text-muted);padding:6px 0;">— session compacted —</div>`;
+    }
+    window._chatMessagesHTML = msgs.innerHTML;
   } catch (e) {
     spinner.innerHTML = `<span style="color:var(--danger)">Error: ${e.message}</span>`;
+    window._chatMessagesHTML = msgs.innerHTML;
   }
   msgs.scrollTop = msgs.scrollHeight;
 };
@@ -884,8 +1039,9 @@ register('more', () => {
   el.innerHTML = `
     <div class="page-header"><span class="page-title">⋯ More</span></div>
     ${[
+      ['📺', 'TV Dashboard', 'tv'],
       ['📥', 'Inbox', 'inbox'],
-      ['💬', 'Chat', 'chat'],
+      ['📸', 'Capture', 'capture'],
       ['⚙️', 'Config', 'config'],
       ['⏱', 'Jobs', 'jobs'],
       ['📋', 'Logs', 'logs'],
@@ -1247,6 +1403,255 @@ window.toggleTail = function() {
 };
 
 // ---------------------------------------------------------------------------
+// TV Dashboard view (fullscreen information radiator)
+// ---------------------------------------------------------------------------
+
+register('tv', async () => {
+  if (window._tvInterval) { clearInterval(window._tvInterval); window._tvInterval = null; }
+  if (window._tvClockInterval) { clearInterval(window._tvClockInterval); window._tvClockInterval = null; }
+
+  const nav = document.getElementById('nav');
+  if (nav) nav.style.display = 'none';
+
+  const mc = document.getElementById('main-content');
+  mc.style.cssText = 'padding:0;overflow:hidden;height:100vh;display:flex;flex-direction:column;';
+  mc.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:var(--text-muted);font-size:18px;">Loading TV dashboard…</div>';
+
+  window._tvLastRefresh = Date.now();
+
+  async function refreshTV() {
+    try {
+      const [goals, dailyData] = await Promise.all([
+        api('GET', '/goals'),
+        api('GET', '/daily?days=1'),
+      ]);
+      window._tvLastRefresh = Date.now();
+      mc.innerHTML = buildTvHTML(goals, dailyData);
+    } catch (e) {
+      mc.innerHTML = `
+        <div class="tv-shell">
+          <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;">
+            <div style="color:var(--danger);font-size:18px;">Error: ${escHtml(e.message)}</div>
+            <button class="btn btn-sm btn-ghost" onclick="navigate('dashboard')">← Back to Dashboard</button>
+          </div>
+        </div>`;
+    }
+  }
+
+  await refreshTV();
+
+  // Combined clock + countdown in one 1-second interval
+  window._tvClockInterval = setInterval(() => {
+    const clockEl = document.getElementById('tv-clock');
+    if (clockEl) {
+      clockEl.textContent = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+    const cdEl = document.getElementById('tv-countdown');
+    if (cdEl) {
+      const elapsed = Math.floor((Date.now() - (window._tvLastRefresh || Date.now())) / 1000);
+      cdEl.textContent = Math.max(0, 60 - elapsed) + 's';
+    }
+  }, 1000);
+
+  // Auto-refresh every 60s
+  window._tvInterval = setInterval(refreshTV, 60000);
+});
+
+function buildTvHTML(goals, dailyData) {
+  const today = localDateStr();
+  const in7 = localDateStr(7);
+
+  const todayEntry = dailyData[0] || { items: [] };
+  const dailyItems = todayEntry.items || [];
+  const doneCount = dailyItems.filter(i => i.status === 'Completed').length;
+  const totalCount = dailyItems.length;
+  const pct = totalCount ? Math.round(doneCount / totalCount * 100) : 0;
+
+  const activeCount = goals.filter(g => g.depth === 0 && g.status === 'Active' && !g.is_milestone).length;
+  const dueThisWeek = goals.filter(g => g.due_date && g.due_date >= today && g.due_date <= in7 && g.status !== 'Completed');
+  const overdue = goals.filter(g => g.due_date && g.due_date < today && g.status !== 'Completed');
+
+  const dateStr = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }).toUpperCase();
+  const timeStr = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  return `
+    <div class="tv-shell">
+      <header class="tv-header">
+        <div class="tv-brand">⚒️ GOAL FORGE</div>
+        <div style="text-align:center;">
+          <div style="font-size:12px;color:var(--text-muted);letter-spacing:0.06em;margin-bottom:2px;">${dateStr}</div>
+          <div id="tv-clock" class="tv-clock">${timeStr}</div>
+        </div>
+        <div class="tv-stats">
+          <div class="tv-stat-pill">
+            <span class="tv-stat-num" style="color:#60a5fa">${activeCount}</span>
+            <span>Active</span>
+          </div>
+          <div class="tv-stat-pill">
+            <span class="tv-stat-num" style="color:${dueThisWeek.length ? '#fbbf24' : 'var(--text-muted)'}">${dueThisWeek.length}</span>
+            <span>Due Soon</span>
+          </div>
+          <div class="tv-stat-pill">
+            <span class="tv-stat-num" style="color:${overdue.length ? '#f87171' : 'var(--text-muted)'}">${overdue.length}</span>
+            <span>Overdue</span>
+          </div>
+          <div class="tv-stat-pill">
+            <span class="tv-stat-num" style="color:#4ade80">${pct}%</span>
+            <span>Today</span>
+          </div>
+        </div>
+      </header>
+      <main class="tv-body">
+        ${buildTvTodayCol(dailyItems, doneCount, totalCount, pct)}
+        ${buildTvGoalsCol(goals)}
+        ${buildTvUpcomingCol(dueThisWeek, overdue, today)}
+      </main>
+      <footer class="tv-footer">
+        <span>Updated ${new Date().toLocaleTimeString()}</span>
+        <span>Auto-refresh in <span id="tv-countdown">60</span>s</span>
+        <button class="btn btn-sm btn-ghost" onclick="navigate('dashboard')" style="font-size:12px;padding:4px 12px;">Exit TV Mode ×</button>
+      </footer>
+    </div>`;
+}
+
+function buildTvTodayCol(items, doneCount, totalCount, pct) {
+  const fillColor = pct >= 67 ? '#4ade80' : pct >= 34 ? '#fbbf24' : '#f87171';
+  const progressHtml = totalCount ? `
+    <div style="margin-bottom:18px;">
+      <div style="background:var(--surface2);border-radius:4px;height:8px;overflow:hidden;margin-bottom:6px;">
+        <div style="height:100%;width:${pct}%;background:${fillColor};border-radius:4px;transition:width 0.5s;"></div>
+      </div>
+      <div style="font-size:13px;color:var(--text-muted);">${doneCount} / ${totalCount} complete</div>
+    </div>` : '';
+
+  const listHtml = items.length
+    ? items.map(item => {
+        const done = item.status === 'Completed';
+        return `<div class="tv-daily-item${done ? ' tv-daily-done' : ''}">
+          <span class="tv-daily-icon">${done ? '✓' : '○'}</span>
+          <span>${escHtml(item.name)}</span>
+        </div>`;
+      }).join('')
+    : '<div style="color:var(--text-muted);font-style:italic;font-size:14px;">No items today</div>';
+
+  return `
+    <section class="tv-col">
+      <div class="tv-col-header">📋 TODAY</div>
+      ${progressHtml}
+      <div class="tv-daily-list">${listHtml}</div>
+    </section>`;
+}
+
+function buildTvGoalsCol(goals) {
+  const HORIZONS = ['Life', 'Yearly', 'Quarterly', 'Monthly', 'Weekly'];
+  const HORIZON_META = {
+    Life:      { icon: '🌍', color: '#a78bfa' },
+    Yearly:    { icon: '🏆', color: '#fbbf24' },
+    Quarterly: { icon: '📊', color: '#38bdf8' },
+    Monthly:   { icon: '🗓', color: '#4ade80' },
+    Weekly:    { icon: '📅', color: '#94a3b8' },
+  };
+
+  // Build full tree (preserve parent-child links), then filter at render time
+  const tree = buildTree(goals);
+
+  // Group depth-0 active/backlog full goals by horizon
+  const grouped = {};
+  HORIZONS.forEach(h => { grouped[h] = []; });
+  tree.filter(n => n.depth === 0 && !n.is_milestone && (n.status === 'Active' || n.status === 'Backlog'))
+    .forEach(n => { if (grouped[n.horizon]) grouped[n.horizon].push(n); });
+
+  let html = '';
+  for (const h of HORIZONS) {
+    if (!grouped[h].length) continue;
+    const meta = HORIZON_META[h] || { icon: '•', color: '#94a3b8' };
+    html += `
+      <div class="tv-horizon-group">
+        <div class="tv-horizon-label" style="color:${meta.color}">${meta.icon} ${h.toUpperCase()}</div>
+        <div class="tv-horizon-goals">
+          ${grouped[h].map(n => renderTvNode(n, 0, meta.color)).join('')}
+        </div>
+      </div>`;
+  }
+
+  return `
+    <section class="tv-col tv-col-center">
+      <div class="tv-col-header">🌳 STRATEGIC GOALS</div>
+      ${html || '<div style="color:var(--text-muted);font-style:italic;">No active goals</div>'}
+    </section>`;
+}
+
+function renderTvNode(node, depth, accentColor) {
+  if (depth > 1) return '';
+  const children = (node._children || [])
+    .filter(c => !c.is_milestone && (c.status === 'Active' || c.status === 'Backlog'))
+    .slice(0, 5);
+  const indent = depth * 16;
+  const isRoot = depth === 0;
+
+  return `
+    <div class="tv-goal-node${isRoot ? ' tv-goal-root' : ' tv-goal-child'}" style="padding-left:${indent}px;">
+      <span style="color:${isRoot ? accentColor : 'var(--border)'};flex-shrink:0;">${isRoot ? '●' : '└'}</span>
+      <span class="tv-goal-name">${escHtml(node.name)}</span>
+      ${node.status === 'Backlog' ? '<span class="tv-badge-backlog">Backlog</span>' : ''}
+      ${node.due_date ? `<span class="tv-goal-due">${tvDaysLabel(node.due_date)}</span>` : ''}
+    </div>
+    ${children.map(c => renderTvNode(c, depth + 1, accentColor)).join('')}`;
+}
+
+function buildTvUpcomingCol(dueThisWeek, overdue, today) {
+  function urgency(dueDate) {
+    const due = new Date(dueDate + 'T12:00:00');
+    const now = new Date(today + 'T12:00:00');
+    const days = Math.round((due - now) / 86400000);
+    if (days < 0)  return { color: '#f87171', label: `${Math.abs(days)}d overdue`, pulse: true };
+    if (days === 0) return { color: '#f87171', label: 'Today!', pulse: false };
+    if (days <= 2)  return { color: '#f97316', label: `in ${days}d`, pulse: false };
+    if (days <= 5)  return { color: '#fbbf24', label: `in ${days}d`, pulse: false };
+    return { color: '#4ade80', label: `in ${days}d`, pulse: false };
+  }
+
+  const upcomingHtml = dueThisWeek.slice(0, 8).map(g => {
+    const u = urgency(g.due_date);
+    return `<div class="tv-due-item">
+      <div class="tv-due-name">${escHtml(g.name)}</div>
+      <div class="tv-due-meta" style="color:${u.color}">${u.label}</div>
+    </div>`;
+  }).join('');
+
+  const overdueHtml = overdue.slice(0, 6).map(g => {
+    const u = urgency(g.due_date);
+    return `<div class="tv-due-item tv-overdue-pulse">
+      <div class="tv-due-name" style="color:#f87171">${escHtml(g.name)}</div>
+      <div class="tv-due-meta" style="color:#f87171">${u.label}</div>
+    </div>`;
+  }).join('');
+
+  return `
+    <section class="tv-col">
+      <div class="tv-col-header">📅 COMING UP</div>
+      ${dueThisWeek.length
+        ? `<div class="tv-section-label">DUE THIS WEEK</div>${upcomingHtml}`
+        : '<div style="color:var(--text-muted);font-style:italic;font-size:14px;">Nothing due this week 🎉</div>'
+      }
+      ${overdue.length ? `
+        <div class="tv-section-label" style="color:#f87171;margin-top:20px;">🚨 OVERDUE</div>
+        ${overdueHtml}
+      ` : ''}
+    </section>`;
+}
+
+function tvDaysLabel(dueDate) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const due = new Date(dueDate + 'T00:00:00');
+  const days = Math.round((due - today) / 86400000);
+  if (days < 0)  return `<span style="color:#f87171;font-size:11px;">${Math.abs(days)}d over</span>`;
+  if (days === 0) return `<span style="color:#f87171;font-size:11px;">Today</span>`;
+  if (days <= 3)  return `<span style="color:#f97316;font-size:11px;">in ${days}d</span>`;
+  return `<span style="color:var(--text-muted);font-size:11px;">in ${days}d</span>`;
+}
+
+// ---------------------------------------------------------------------------
 // Goal promote/demote API endpoints (wired up in capture.py)
 // ---------------------------------------------------------------------------
 
@@ -1261,7 +1666,8 @@ async function extraEndpointSetup() {
 function initApp() {
   if (!TOKEN) { showLogin(); return; }
   buildShell();
-  navigate('dashboard');
+  const hash = window.location.hash.slice(1);
+  navigate(hash && routes[hash] ? hash : 'dashboard');
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/service-worker.js');
   }

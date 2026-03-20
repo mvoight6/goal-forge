@@ -17,7 +17,6 @@ from goalforge.logs_api import setup_logging
 setup_logging()  # Must be first so all subsequent imports get configured loggers
 
 import logging
-from goalforge import scanner
 from goalforge.scheduler import start_scheduler, stop_scheduler
 from goalforge import capture, interactive, scheduler, config_api, logs_api, daily_api
 
@@ -66,11 +65,6 @@ def serve_sw():
 async def on_startup():
     logger.info("Goal Forge starting up…")
     start_scheduler()
-    # Initial vault scan on startup
-    try:
-        scanner.run_scan()
-    except Exception as e:
-        logger.warning("Initial scan failed: %s", e)
 
 
 @app.on_event("shutdown")
@@ -108,12 +102,9 @@ if __name__ == "__main__":
             for c in children:
                 print(f"  [{c['id']}] {c['name']}")
             sys.exit(0)
-        elif cmd == "scan":
-            scanner.run_scan()
-            sys.exit(0)
         else:
             print(f"Unknown command: {cmd}")
-            print("Usage: python main.py [plan <goal_id> | scan]")
+            print("Usage: python main.py plan <goal_id>")
             sys.exit(1)
 
     logger.info("Starting server on %s:%s", host, port)

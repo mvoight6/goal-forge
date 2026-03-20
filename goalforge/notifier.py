@@ -7,6 +7,7 @@ import asyncio
 import logging
 import smtplib
 from datetime import date, datetime, timedelta
+from urllib.parse import quote as _urlencode
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -33,18 +34,22 @@ def send_push(title: str, body: str, priority: str = "default", tags: list = Non
     """Send a push notification via ntfy.sh."""
     ntfy_cfg = config.ntfy
     url = f"{ntfy_cfg.server}/{ntfy_cfg.topic}"
+    logger.info("Sending push to %s — %s", url, title)
     try:
-        httpx.post(
+        resp = httpx.post(
             url,
             headers={
-                "Title": title,
+                "Title": _urlencode(title),
                 "Priority": priority,
                 "Tags": ",".join(tags or []),
             },
             content=body.encode("utf-8"),
             timeout=10,
         )
-        logger.info("Push sent: %s", title)
+        if resp.status_code >= 300:
+            logger.error("Push notification HTTP %d from %s: %s", resp.status_code, url, resp.text[:300])
+        else:
+            logger.info("Push sent OK (%d): %s", resp.status_code, title)
     except Exception as e:
         logger.error("Push notification failed: %s", e)
 
@@ -130,7 +135,7 @@ def check_due_dates():
                 days_left = (
                     datetime.strptime(str(g["due_date"]), "%Y-%m-%d").date() - date.today()
                 ).days
-                title = f"⏰ [{g['id']}] Due in {days_left}d: {g['name']}"
+                title = f"⏰ Due in {days_left}d: {g['name']}"
                 body = f"{g['name']} is due in {days_left} day(s) ({g['due_date']}). Status: {g.get('status', 'Unknown')}"
                 deliver("due_soon", title, body)
                 database.mark_notification_sent(g["id"], "due_soon")
@@ -141,16 +146,18 @@ def check_due_dates():
         goals = database.get_goals_overdue()
         for g in goals:
             if not database.was_notification_sent_today(g["id"], "goal_overdue"):
-                title = f"🚨 [{g['id']}] Overdue: {g['name']}"
+                title = f"🚨 Overdue: {g['name']}"
                 body = f"{g['name']} was due {g['due_date']} and is not yet completed."
                 deliver("goal_overdue", title, body)
                 database.mark_notification_sent(g["id"], "goal_overdue")
 
 
-def send_daily_morning_briefing():
+def send_daily_morning_briefing(force: bool = False):
     """Daily morning briefing — LLM-generated focus summary."""
+    logger.info("send_daily_morning_briefing called (force=%s)", force)
     period_key = date.today().isoformat()
-    if database.was_digest_sent("daily_morning_briefing", period_key):
+    if not force and database.was_digest_sent("daily_morning_briefing", period_key):
+        logger.info("Daily briefing already sent for %s — skipping", period_key)
         return
 
     active_goals = database.get_all_goals({"status": "Active"})
@@ -158,8 +165,8 @@ def send_daily_morning_briefing():
     due_soon = database.get_goals_due_within(3)
     overdue = database.get_goals_overdue()
 
-    goal_summary = "\n".join(f"- [{g['id']}] {g['name']} (due {g.get('due_date', 'N/A')})" for g in active_goals[:20])
-    overdue_str = "\n".join(f"- [{g['id']}] {g['name']}" for g in overdue[:5])
+    goal_summary = "\n".join(f"- {g['name']} (due {g.get('due_date', 'N/A')})" for g in active_goals[:20])
+    overdue_str = "\n".join(f"- {g['name']}" for g in overdue[:5])
 
     prompt = f"""Today is {date.today().strftime('%A, %B %d, %Y')}.
 
@@ -187,31 +194,34 @@ Write a short (3-5 sentence) morning briefing that tells the user what to focus 
     database.mark_digest_sent("daily_morning_briefing", period_key)
 
 
-def send_weekly_digest():
+def send_weekly_digest(force: bool = False):
     """Monday morning — push digest of active goals due this week."""
+    logger.info("send_weekly_digest called (force=%s)", force)
     today = date.today()
     week_key = today.strftime("%Y-W%W")
-    if database.was_digest_sent("weekly_digest", week_key):
+    if not force and database.was_digest_sent("weekly_digest", week_key):
+        logger.info("Weekly digest already sent for %s — skipping", week_key)
         return
 
-    week_end = today + timedelta(days=6)
     goals = database.get_goals_due_within(7)
 
     if not goals:
         body = "No goals due this week. Good time to plan ahead!"
     else:
-        lines = [f"• [{g['id']}] {g['name']} (due {g.get('due_date', '?')})" for g in goals]
+        lines = [f"• {g['name']} (due {g.get('due_date', '?')})" for g in goals]
         body = "Goals due this week:\n" + "\n".join(lines)
 
     deliver("weekly_digest", f"📋 Weekly Digest — {today.strftime('%b %d')}", body)
     database.mark_digest_sent("weekly_digest", week_key)
 
 
-def send_end_of_week_summary():
+def send_end_of_week_summary(force: bool = False):
     """Friday afternoon — LLM-generated week reflection email."""
+    logger.info("send_end_of_week_summary called (force=%s)", force)
     today = date.today()
     week_key = today.strftime("%Y-W%W-eow")
-    if database.was_digest_sent("end_of_week_summary", week_key):
+    if not force and database.was_digest_sent("end_of_week_summary", week_key):
+        logger.info("End-of-week summary already sent for %s — skipping", week_key)
         return
 
     week_start = today - timedelta(days=today.weekday())
@@ -250,10 +260,12 @@ Write a warm end-of-week reflection (3-4 sentences). Celebrate wins, acknowledge
     database.mark_digest_sent("end_of_week_summary", week_key)
 
 
-def send_inbox_review_prompt():
+def send_inbox_review_prompt(force: bool = False):
     """Sunday morning — push reminder to review inbox captures."""
+    logger.info("send_inbox_review_prompt called (force=%s)", force)
     period_key = date.today().isoformat()
-    if database.was_digest_sent("inbox_review", period_key):
+    if not force and database.was_digest_sent("inbox_review", period_key):
+        logger.info("Inbox review already sent for %s — skipping", period_key)
         return
 
     drafts = database.get_draft_captures()
@@ -268,11 +280,13 @@ def send_inbox_review_prompt():
     database.mark_digest_sent("inbox_review", period_key)
 
 
-def send_beginning_of_month():
+def send_beginning_of_month(force: bool = False):
     """1st of month — LLM-generated monthly plan email."""
+    logger.info("send_beginning_of_month called (force=%s)", force)
     today = date.today()
     period_key = today.strftime("%Y-%m-bom")
-    if database.was_digest_sent("beginning_of_month", period_key):
+    if not force and database.was_digest_sent("beginning_of_month", period_key):
+        logger.info("Beginning-of-month already sent for %s — skipping", period_key)
         return
 
     month_name = today.strftime("%B %Y")
@@ -282,7 +296,7 @@ def send_beginning_of_month():
     month_goals = database.get_goals_due_within(days_in_month)
     active_goals = database.get_all_goals({"status": "Active"})
 
-    goals_str = "\n".join(f"- [{g['id']}] {g['name']} (due {g.get('due_date', '?')})" for g in month_goals[:20])
+    goals_str = "\n".join(f"- {g['name']} (due {g.get('due_date', '?')})" for g in month_goals[:20])
     active_str = "\n".join(f"- {g['name']}" for g in active_goals[:15])
 
     prompt = f"""It's the beginning of {month_name}.
@@ -311,11 +325,13 @@ Write a motivating 3-4 sentence monthly plan introduction. Highlight the key goa
     database.mark_digest_sent("beginning_of_month", period_key)
 
 
-def send_end_of_month():
+def send_end_of_month(force: bool = False):
     """Last day of month — LLM-generated monthly summary email."""
+    logger.info("send_end_of_month called (force=%s)", force)
     today = date.today()
     period_key = today.strftime("%Y-%m-eom")
-    if database.was_digest_sent("end_of_month", period_key):
+    if not force and database.was_digest_sent("end_of_month", period_key):
+        logger.info("End-of-month already sent for %s — skipping", period_key)
         return
 
     month_name = today.strftime("%B %Y")

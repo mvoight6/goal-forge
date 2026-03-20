@@ -1,6 +1,6 @@
 """
 Quick-capture endpoint — accepts text + images via multipart/form-data.
-Saves images to vault attachments folder, writes a .md capture file.
+Saves images to the data/attachments folder, creates a draft capture record in the database.
 Partial failures return HTTP 207 with per-image status.
 """
 import logging
@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from goalforge.config import config
@@ -71,45 +71,11 @@ def _validate_image(file: UploadFile) -> tuple[bool, str, str]:
     return True, ext, ""
 
 
-def _write_capture_md(
-    goal_id: str,
-    title: str,
-    description: str,
-    saved_images: list[str],
-) -> Path:
-    inbox_path = Path(config.vault_path) / config.inbox_folder
-    inbox_path.mkdir(parents=True, exist_ok=True)
-
-    safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in title)[:60]
-    file_path = inbox_path / f"{goal_id} {safe_title}.md"
-
-    image_embeds = "\n".join(f"![[{img}]]" for img in saved_images)
-    image_wikilinks = "\n".join(f"- [[Goals/_inbox/attachments/{img}]]" for img in saved_images)
-
-    content = f"""---
-id: {goal_id}
-name: "{title}"
-status: Draft
-created_date: {date.today().isoformat()}
-tags: [capture]
----
-
-## Note
-{description or title}
-"""
-
-    if saved_images:
-        content += f"""
-## Images
-{image_embeds}
-
-## Attachments
-{image_wikilinks}
-"""
-
-    file_path.write_text(content, encoding="utf-8")
-    logger.info("Capture written: %s", file_path.name)
-    return file_path
+def _attachments_path() -> Path:
+    """Return the data/attachments directory, derived from the database location."""
+    path = Path(config.database_path).parent / "attachments"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 @router.post("/capture")
@@ -122,9 +88,7 @@ async def capture(
     db = database.get_db()
     goal_id = id_generator.next_id(db)
 
-    attachments_path = Path(config.vault_path) / config.attachments_folder
-    attachments_path.mkdir(parents=True, exist_ok=True)
-
+    attachments_path = _attachments_path()
     max_bytes = _max_bytes()
     saved_images: list[str] = []
     image_results: list[dict] = []
@@ -154,6 +118,7 @@ async def capture(
 
             dest.write_bytes(data)
             saved_images.append(filename)
+            database.upsert_attachment(goal_id, filename, file.content_type or "")
             image_results.append({"filename": file.filename, "saved_as": filename, "status": "saved"})
             logger.info("Saved image %s", filename)
 
@@ -162,16 +127,14 @@ async def capture(
             image_results.append({"filename": file.filename, "status": "error", "error": str(e)})
             any_failed = True
 
-    # Write the capture .md file
-    md_path = _write_capture_md(goal_id, title, description or "", saved_images)
-
     # Upsert into DB as a Draft capture
     database.upsert_goal({
         "id": goal_id,
         "name": title,
         "status": "Draft",
+        "description": description or "",
+        "tags": '["capture"]',
         "created_date": date.today().isoformat(),
-        "file_path": str(md_path),
     })
 
     result = {
@@ -194,9 +157,10 @@ def list_goals_api(
     horizon: Optional[str] = None,
     is_milestone: Optional[bool] = None,
     full_only: bool = False,
+    exclude_daily_checklist: bool = True,
     token: str = Depends(_auth),
 ):
-    """List goals with optional filtering."""
+    """List goals with optional filtering. Daily checklist items are excluded by default."""
     filters = {}
     if status:
         filters["status"] = status
@@ -204,6 +168,8 @@ def list_goals_api(
         filters["horizon"] = horizon
     if is_milestone is not None:
         filters["is_milestone"] = is_milestone
+    if exclude_daily_checklist:
+        filters["exclude_daily_checklist"] = True
 
     if full_only:
         return database.get_full_goals(filters)
@@ -296,3 +262,29 @@ def demote_goal_api(goal_id: str, token: str = Depends(_auth)):
         return demote_to_milestone(goal_id)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/search")
+def search_api(q: str, token: str = Depends(_auth)):
+    """Search goals by name or description."""
+    if not q or not q.strip():
+        raise HTTPException(status_code=400, detail="q parameter is required")
+    return database.search_goals(q.strip())
+
+
+@router.get("/goals/{goal_id}/attachments")
+def get_goal_attachments(goal_id: str, token: str = Depends(_auth)):
+    """List attachments for a goal."""
+    goal = database.get_goal(goal_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail=f"Goal {goal_id} not found")
+    return database.get_attachments(goal_id)
+
+
+@router.get("/attachments/{filename}")
+def serve_attachment(filename: str, token: str = Depends(_auth)):
+    """Serve an attachment file."""
+    path = _attachments_path() / filename
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    return FileResponse(path)

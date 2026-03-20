@@ -10,7 +10,6 @@ from typing import Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -24,7 +23,6 @@ _scheduler: Optional[BackgroundScheduler] = None
 
 # Track last-run times per job
 _last_run: dict[str, Optional[datetime]] = {
-    "scan": None,
     "check_due_dates": None,
     "daily_morning_briefing": None,
     "weekly_digest": None,
@@ -48,12 +46,6 @@ def _parse_time(time_str: str) -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 # Job wrappers — read config at execution time
 # ---------------------------------------------------------------------------
-
-def _job_scan():
-    _record_run("scan")
-    from goalforge import scanner
-    scanner.run_scan()
-
 
 def _job_check_due_dates():
     _record_run("check_due_dates")
@@ -98,7 +90,6 @@ def _job_end_of_month():
 
 
 JOB_MAP = {
-    "scan": _job_scan,
     "check_due_dates": _job_check_due_dates,
     "daily_morning_briefing": _job_daily_morning_briefing,
     "weekly_digest": _job_weekly_digest,
@@ -112,9 +103,6 @@ JOB_MAP = {
 def start_scheduler():
     global _scheduler
     _scheduler = BackgroundScheduler(timezone="UTC")
-
-    scan_minutes = int(config.scheduler.scan_interval_minutes or 15)
-    _scheduler.add_job(_job_scan, IntervalTrigger(minutes=scan_minutes), id="scan", replace_existing=True)
 
     # Daily due-date check at 08:00
     _scheduler.add_job(_job_check_due_dates, CronTrigger(hour=8, minute=0), id="check_due_dates", replace_existing=True)
@@ -169,7 +157,7 @@ def get_jobs_status() -> list[dict]:
 
         # Check if job is disabled in config
         disabled = False
-        if job_id not in ("scan", "check_due_dates"):
+        if job_id not in ("check_due_dates",):
             try:
                 n_cfg = config.notifications
                 type_cfg = getattr(n_cfg, job_id, None)
@@ -203,10 +191,21 @@ def run_job_now(job_name: str, token: str = Depends(_auth)):
         raise HTTPException(status_code=404, detail=f"Unknown job '{job_name}'. Valid: {', '.join(JOB_MAP)}")
 
     def _run():
+        logger.info("Manual trigger: %s", job_name)
         try:
-            JOB_MAP[job_name]()
+            from goalforge import notifier
+            _force_map = {
+                "check_due_dates":         notifier.check_due_dates,
+                "daily_morning_briefing":  lambda: notifier.send_daily_morning_briefing(force=True),
+                "weekly_digest":           lambda: notifier.send_weekly_digest(force=True),
+                "end_of_week_summary":     lambda: notifier.send_end_of_week_summary(force=True),
+                "inbox_review":            lambda: notifier.send_inbox_review_prompt(force=True),
+                "beginning_of_month":      lambda: notifier.send_beginning_of_month(force=True),
+                "end_of_month":            lambda: notifier.send_end_of_month(force=True),
+            }
+            _force_map[job_name]()
         except Exception as e:
-            logger.error("Manual job '%s' failed: %s", job_name, e)
+            logger.error("Manual job '%s' failed: %s", job_name, e, exc_info=True)
 
     thread = threading.Thread(target=_run, daemon=True, name=f"manual-{job_name}")
     thread.start()
