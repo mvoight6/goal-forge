@@ -1,4 +1,4 @@
-const CACHE_NAME = 'goalforge-v4';
+const CACHE_NAME = 'goalforge-v10';
 const SHELL_FILES = [
   '/',
   '/style.css',
@@ -33,7 +33,10 @@ self.addEventListener('fetch', event => {
       url.pathname.startsWith('/jobs') ||
       url.pathname.startsWith('/logs') ||
       url.pathname.startsWith('/config') ||
-      url.pathname.startsWith('/inbox')) {
+      url.pathname.startsWith('/inbox') ||
+      url.pathname.startsWith('/categories') ||
+      url.pathname.startsWith('/ideas') ||
+      url.pathname.startsWith('/daily')) {
     event.respondWith(fetch(event.request).catch(() =>
       new Response(JSON.stringify({ error: 'Offline' }), {
         headers: { 'Content-Type': 'application/json' }

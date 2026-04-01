@@ -18,7 +18,7 @@ setup_logging()  # Must be first so all subsequent imports get configured logger
 
 import logging
 from goalforge.scheduler import start_scheduler, stop_scheduler
-from goalforge import capture, interactive, scheduler, config_api, logs_api, daily_api
+from goalforge import capture, interactive, scheduler, config_api, logs_api, daily_api, ideas_api, categories_api
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,8 @@ app.include_router(scheduler.router)
 app.include_router(config_api.router)
 app.include_router(logs_api.router)
 app.include_router(daily_api.router)
+app.include_router(ideas_api.router)
+app.include_router(categories_api.router)
 
 # Serve PWA static files
 PWA_DIR = Path(__file__).parent / "pwa"

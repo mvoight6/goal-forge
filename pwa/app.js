@@ -136,6 +136,9 @@ function buildShell() {
       <button class="nav-btn" data-view="daily" onclick="navigate('daily')">
         <span class="icon">📋</span>Daily
       </button>
+      <button class="nav-btn" data-view="ideas" onclick="navigate('ideas')">
+        <span class="icon">💡</span>Ideas
+      </button>
       <button class="nav-btn" data-view="goals" onclick="navigate('goals')">
         <span class="icon">🎯</span>Strategic
       </button>
@@ -150,6 +153,294 @@ function buildShell() {
 }
 
 // ---------------------------------------------------------------------------
+// Categories
+// ---------------------------------------------------------------------------
+let _categoriesCache = null;
+async function fetchCategories() {
+  if (!_categoriesCache) _categoriesCache = await api('GET', '/categories');
+  return _categoriesCache;
+}
+function invalidateCategories() { _categoriesCache = null; }
+
+const CATEGORY_EMOJIS = [
+  '🏠','🏡','👤','❤️','👨‍👩‍👧','🤝','🎁',
+  '💼','🏢','📊','📋','📈','💵','🤵',
+  '💪','🏃','🧘','🥗','💊','🏥','🫀',
+  '💰','💳','🏦','💸',
+  '📚','🎓','📖','✏️','🔬',
+  '✈️','🗺️','🌍','🧳','🏖️',
+  '🎨','🖌️','📷','🎭','✍️',
+  '💻','⌨️','📱','🔧','🖥️','⚙️',
+  '👥','💬','🎉','🥳',
+  '🌱','🌿','🌳','🌸','🦋',
+  '🎮','🎵','⚽','🎸','🎯','♟️',
+  '🏆','🌟','🚀','🎖️',
+];
+const _CONCEPT_EMOJIS = {
+  personal:   ['🏠','👤','❤️','🏡','🎁'],
+  home:       ['🏠','🏡','🛋️','🔑','🌿'],
+  family:     ['👨‍👩‍👧','❤️','🏠','🤝','🎁'],
+  work:       ['💼','🏢','📊','📋','⌨️','💻'],
+  career:     ['💼','📈','🏆','🎯','🤝','🤵'],
+  business:   ['🏢','💰','📊','🤝','📋','💵'],
+  office:     ['🏢','💼','📋','⌨️','☕'],
+  job:        ['💼','🏢','📋','🤝','💵'],
+  health:     ['💪','🏃','❤️','🥗','🧘','💊','🏥'],
+  fitness:    ['🏃','💪','⚽','🧘','🥗','🫀'],
+  wellness:   ['🧘','❤️','🌿','🌸','💊','🫀'],
+  gym:        ['💪','🏋️','🏃','⚽','🧘'],
+  finance:    ['💰','💳','📈','🏦','💵','💸'],
+  money:      ['💰','💵','💳','📈','🏦'],
+  savings:    ['💰','🏦','💵','📈','💳'],
+  budget:     ['💳','💰','📊','💵','📋'],
+  learning:   ['📚','🎓','📖','✏️','🔬','🏫'],
+  education:  ['🎓','📚','✏️','🏫','📖','🔬'],
+  study:      ['📖','📚','✏️','🎓','🔬'],
+  school:     ['🏫','📚','🎓','✏️','📖'],
+  travel:     ['✈️','🗺️','🌍','🧳','🏖️','🚂'],
+  adventure:  ['🗺️','✈️','🏔️','🌍','🧳','🏖️'],
+  trip:       ['✈️','🧳','🗺️','🌍','🏖️'],
+  creative:   ['🎨','✏️','🖌️','📷','🎭','✍️'],
+  art:        ['🎨','🖌️','✏️','🎭','📷'],
+  design:     ['🎨','✏️','💻','🖌️','📱'],
+  tech:       ['💻','⌨️','📱','🔧','🖥️','⚙️'],
+  code:       ['💻','⌨️','🖥️','🔧','⚙️'],
+  software:   ['💻','⌨️','🖥️','📱','🔧'],
+  coding:     ['💻','⌨️','🖥️','🔧','📱'],
+  social:     ['👥','💬','🎉','🤝','❤️','🥳'],
+  friends:    ['👥','❤️','🎉','🤝','💬'],
+  spiritual:  ['🧘','🙏','🌸','🌟','☮️'],
+  mindfulness:['🧘','🌿','🌸','❤️','🌟'],
+  meditation: ['🧘','🌸','🌿','☮️','🌟'],
+  hobby:      ['🎯','🎮','🎵','⚽','🎸','♟️'],
+  fun:        ['🎮','🎉','🎯','🎵','⚽','🥳'],
+  gaming:     ['🎮','🕹️','🏆','💻','⚔️'],
+  music:      ['🎵','🎸','🎹','🎤','🎶'],
+  nature:     ['🌱','🌿','🌳','🦋','🌸','🌞'],
+  garden:     ['🌱','🌿','🌻','🌳','🦋'],
+  tools:      ['🔧','⚙️','🔨','🛠️','💻'],
+  repair:     ['🔧','🔨','⚙️','🛠️'],
+  phone:      ['📱','💻','⌨️','📞'],
+  mobile:     ['📱','💻','⌨️','🖥️'],
+  achievement:['🏆','🌟','🚀','🎯','🎖️'],
+  success:    ['🌟','🏆','🚀','📈','🎯'],
+};
+function suggestEmoji(name) {
+  const lower = (name || '').toLowerCase();
+  for (const [key, emojis] of Object.entries(_CONCEPT_EMOJIS)) {
+    if (lower.includes(key)) return emojis[0];
+  }
+  return '🏷️';
+}
+
+function categorySelectHtml(categories, selectedName, selectId) {
+  const opts = categories.map(c =>
+    `<option value="${escHtml(c.name)}" ${c.name === selectedName ? 'selected' : ''}>${c.icon} ${escHtml(c.name)}</option>`
+  ).join('');
+  return `<div class="cat-select-wrapper" id="cat-wrapper-${selectId}">
+    <select id="${selectId}" onchange="handleCategoryChange(this)">
+      <option value="">— No Category —</option>
+      ${opts}
+      <option value="__gf_add_category__">➕ Add Category…</option>
+    </select>
+  </div>`;
+}
+
+window.handleCategoryChange = function(sel) {
+  if (sel.value !== '__gf_add_category__') { sel.dataset.lastval = sel.value; return; }
+  const prevVal = sel.dataset.lastval || '';
+  sel.value = prevVal;
+  const selectId = sel.id;
+  openManageCategoriesModal(async () => {
+    invalidateCategories();
+    const cats = await fetchCategories().catch(() => []);
+    const wrapper = document.getElementById(`cat-wrapper-${selectId}`);
+    if (wrapper) {
+      const cur = wrapper.querySelector('select');
+      const curVal = cur ? cur.value : prevVal;
+      wrapper.outerHTML = categorySelectHtml(cats, curVal, selectId);
+    }
+  });
+};
+
+function getSuggestedEmojis(name) {
+  const lower = (name || '').toLowerCase().trim();
+  if (!lower) return [];
+  const seen = new Set();
+  const results = [];
+  for (const [key, emojis] of Object.entries(_CONCEPT_EMOJIS)) {
+    if (lower.includes(key) || key.includes(lower)) {
+      for (const e of emojis) {
+        if (!seen.has(e)) { seen.add(e); results.push(e); }
+      }
+    }
+  }
+  return results.slice(0, 10);
+}
+
+// Emoji picker
+let _emojiPickerCallback = null;
+window.openEmojiPicker = function(btnId, onSelect, nameHint) {
+  _emojiPickerCallback = onSelect;
+  const existing = document.getElementById('emoji-picker-overlay');
+  if (existing) existing.remove();
+  const suggested = getSuggestedEmojis(nameHint || '');
+  const suggestedHtml = suggested.length ? `
+    <div class="emoji-picker-section-label">Suggested</div>
+    <div class="emoji-grid" style="margin-bottom:10px;">
+      ${suggested.map(e => `<button class="emoji-btn" onclick="window._emojiSelect('${e}')">${e}</button>`).join('')}
+    </div>
+    <div class="emoji-picker-section-label">All</div>
+  ` : '';
+  const overlay = document.createElement('div');
+  overlay.id = 'emoji-picker-overlay';
+  overlay.className = 'emoji-picker-overlay';
+  overlay.innerHTML = `<div class="emoji-picker-popup">
+    ${suggestedHtml}
+    <div class="emoji-grid">
+      ${CATEGORY_EMOJIS.map(e => `<button class="emoji-btn" onclick="window._emojiSelect('${e}')">${e}</button>`).join('')}
+    </div>
+  </div>`;
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+};
+window._emojiSelect = function(emoji) {
+  if (_emojiPickerCallback) _emojiPickerCallback(emoji);
+  _emojiPickerCallback = null;
+  const overlay = document.getElementById('emoji-picker-overlay');
+  if (overlay) overlay.remove();
+};
+
+function renderCatRow(cat) {
+  return `<div class="cat-row" data-id="${cat.id}">
+    <span class="drag-handle" title="Drag to reorder">⠿</span>
+    <button class="cat-icon-btn" id="cat-icon-${cat.id}" onclick="openEmojiPicker('cat-icon-${cat.id}', e => updateCatIcon(${cat.id}, e), '${escHtml(cat.name)}')">${cat.icon}</button>
+    <input class="cat-name-input" value="${escHtml(cat.name)}" onblur="saveCatName(${cat.id}, this.value)" onkeydown="if(event.key==='Enter')this.blur()">
+    <button class="btn btn-sm btn-danger" style="flex-shrink:0;" onclick="deleteCatFromModal(${cat.id}, '${escHtml(cat.name)}')">🗑</button>
+  </div>`;
+}
+
+window.openManageCategoriesModal = async function(onClose) {
+  const existing = document.getElementById('cat-modal-overlay');
+  if (existing) existing.remove();
+  const cats = await fetchCategories().catch(() => []);
+  const overlay = document.createElement('div');
+  overlay.id = 'cat-modal-overlay';
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal" style="max-width:480px;max-height:80vh;display:flex;flex-direction:column;">
+      <h3 style="margin-bottom:16px;">Manage Categories</h3>
+      <div id="cat-list" style="overflow-y:auto;flex:1;">
+        ${cats.map(c => renderCatRow(c)).join('')}
+      </div>
+      <div class="cat-add-form">
+        <button class="cat-icon-btn" id="new-cat-icon-btn" onclick="openEmojiPicker('new-cat-icon-btn', e => { const b=document.getElementById('new-cat-icon-btn'); b.textContent=e; b.dataset.manual='1'; }, document.getElementById('new-cat-name').value)">🏷️</button>
+        <input type="text" id="new-cat-name" placeholder="Category name" oninput="autoSuggestNewIcon(this.value)" style="flex:1;">
+        <button class="btn btn-primary btn-sm" onclick="addCategoryFromModal()">Add</button>
+      </div>
+      <div class="modal-actions" style="margin-top:12px;">
+        <button class="btn btn-primary" onclick="closeManageCategoriesModal()">Done</button>
+      </div>
+    </div>
+  `;
+  overlay._onClose = onClose || null;
+  document.body.appendChild(overlay);
+  initCategoryDrag(document.getElementById('cat-list'));
+};
+
+window.closeManageCategoriesModal = function() {
+  const overlay = document.getElementById('cat-modal-overlay');
+  const cb = overlay ? overlay._onClose : null;
+  if (overlay) overlay.remove();
+  if (cb) cb();
+};
+
+window.autoSuggestNewIcon = function(name) {
+  const btn = document.getElementById('new-cat-icon-btn');
+  if (!btn || btn.dataset.manual === '1') return;
+  btn.textContent = suggestEmoji(name);
+};
+
+window.addCategoryFromModal = async function() {
+  const nameEl = document.getElementById('new-cat-name');
+  const iconEl = document.getElementById('new-cat-icon-btn');
+  const name = (nameEl ? nameEl.value : '').trim();
+  if (!name) { toast('Category name is required'); return; }
+  const icon = iconEl ? iconEl.textContent.trim() : '🏷️';
+  try {
+    const cat = await api('POST', '/categories', { name, icon });
+    invalidateCategories();
+    if (nameEl) { nameEl.value = ''; }
+    if (iconEl) { iconEl.textContent = '🏷️'; delete iconEl.dataset.manual; }
+    const listEl = document.getElementById('cat-list');
+    if (listEl) listEl.insertAdjacentHTML('beforeend', renderCatRow(cat));
+    toast('Category added');
+  } catch (e) { toast(`Error: ${e.message}`); }
+};
+
+window.saveCatName = async function(id, newName) {
+  const name = (newName || '').trim();
+  if (!name) return;
+  try {
+    await api('PUT', `/categories/${id}`, { name });
+    invalidateCategories();
+  } catch (e) { toast(`Save failed: ${e.message}`); }
+};
+
+window.updateCatIcon = async function(id, icon) {
+  const btn = document.getElementById(`cat-icon-${id}`);
+  if (btn) btn.textContent = icon;
+  try {
+    await api('PUT', `/categories/${id}`, { icon });
+    invalidateCategories();
+  } catch (e) { toast(`Save failed: ${e.message}`); }
+};
+
+window.deleteCatFromModal = async function(id, name) {
+  if (!confirm(`Delete category "${name}"?\n\nGoals and ideas using it will become uncategorized.`)) return;
+  try {
+    await api('DELETE', `/categories/${id}`);
+    invalidateCategories();
+    const row = document.querySelector(`.cat-row[data-id="${id}"]`);
+    if (row) row.remove();
+    toast('Category deleted');
+  } catch (e) { toast(`Error: ${e.message}`); }
+};
+
+function initCategoryDrag(listEl) {
+  listEl.addEventListener('pointerdown', e => {
+    const handle = e.target.closest('.drag-handle');
+    if (!handle) return;
+    e.preventDefault();
+    const dragEl = handle.closest('.cat-row');
+    if (!dragEl) return;
+    dragEl.style.opacity = '0.5';
+    function onMove(ev) {
+      const rows = [...listEl.querySelectorAll('.cat-row')];
+      let insertBefore = null;
+      for (const row of rows) {
+        if (row === dragEl) continue;
+        const r = row.getBoundingClientRect();
+        if (ev.clientY < r.top + r.height / 2) { insertBefore = row; break; }
+      }
+      listEl.insertBefore(dragEl, insertBefore);
+    }
+    async function onUp() {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      dragEl.style.opacity = '';
+      const ids = [...listEl.querySelectorAll('.cat-row')].map(r => parseInt(r.dataset.id));
+      try {
+        await api('PUT', '/categories/order', { ids });
+        invalidateCategories();
+      } catch { toast('Failed to save order'); }
+    }
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp, { once: true });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Dashboard view
 // ---------------------------------------------------------------------------
 register('dashboard', async () => {
@@ -157,10 +448,11 @@ register('dashboard', async () => {
   el.innerHTML = `<div class="page-header"><span class="page-title">⚒️ Goal Forge</span><button class="btn btn-sm btn-ghost" onclick="navigate('dashboard')">↺</button></div><div class="spinner"></div>`;
 
   try {
-    const [goals, inbox, dailyData] = await Promise.all([
+    const [goals, inbox, dailyData, topIdeas] = await Promise.all([
       api('GET', '/goals'),
       api('GET', '/inbox'),
       api('GET', '/daily?days=1'),
+      api('GET', '/ideas/top?n=5'),
     ]);
 
     const today = localDateStr();
@@ -202,6 +494,14 @@ register('dashboard', async () => {
         ${rootBacklog.map(g => goalCard(g)).join('')}
       ` : ''}
 
+      ${topIdeas.length ? `
+        <div class="section-header" style="display:flex;align-items:center;justify-content:space-between;">
+          <span>💡 Top Ideas</span>
+          <button class="btn btn-sm btn-ghost" onclick="navigate('ideas')">View All</button>
+        </div>
+        ${topIdeas.map(i => ideaCard(i, true)).join('')}
+      ` : ''}
+
       ${inbox.length ? `
         <div class="section-header">📥 Inbox (${inbox.length})</div>
         <button class="btn btn-secondary btn-full" onclick="navigate('inbox')">Review Inbox</button>
@@ -223,8 +523,24 @@ function summaryCard(icon, label, count, color) {
 }
 
 function statusBadge(status) {
-  const map = { Active: 'active', Completed: 'completed', Blocked: 'blocked', Backlog: 'backlog', Draft: 'draft' };
+  const map = { Active: 'active', Completed: 'completed', Blocked: 'blocked', Backlog: 'backlog', Draft: 'draft', Incubating: 'incubating', Graduated: 'graduated', Archived: 'archived' };
   return `<span class="badge badge-${map[status] || 'backlog'}">${status || '—'}</span>`;
+}
+
+function priorityBadge(priority) {
+  const map = { Critical: 'critical', High: 'high', Medium: 'medium', Low: 'low' };
+  return `<span class="badge badge-priority-${map[priority] || 'medium'}">${priority || 'Medium'}</span>`;
+}
+
+function ideaCard(idea, compact = false) {
+  return `<div class="card" onclick="navigate('idea-detail', {id:'${idea.id}'})" style="cursor:pointer;">
+    <div class="card-row">
+      <span class="card-title">${escHtml(idea.name)}</span>
+      <div style="display:flex;gap:6px;flex-shrink:0;">${priorityBadge(idea.priority)}${statusBadge(idea.status)}</div>
+    </div>
+    ${!compact && idea.description ? `<div style="font-size:13px;color:var(--text-muted);margin-top:6px;line-height:1.4;">${escHtml(idea.description.slice(0, 120))}${idea.description.length > 120 ? '…' : ''}</div>` : ''}
+    <div class="card-meta" style="margin-top:4px;">${idea.id}${idea.category ? ' · ' + escHtml(idea.category) : ''} · ${idea.created_at ? idea.created_at.slice(0, 10) : ''}</div>
+  </div>`;
 }
 
 function goalCard(g, showPlan = false) {
@@ -454,8 +770,282 @@ register('daily', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// Ideas list view
+// ---------------------------------------------------------------------------
+register('ideas', async () => {
+  const el = document.getElementById('main-content');
+  el.innerHTML = `<div class="page-header"><span class="page-title">💡 Ideas</span></div><div class="spinner"></div>`;
+
+  let sort = { col: 'category', dir: 1 };
+
+  async function render() {
+    try {
+      const ideas = await api('GET', '/ideas');
+      const cats = await fetchCategories().catch(() => []);
+      const catMap = Object.fromEntries(cats.map(c => [c.name, c.icon]));
+
+      const sorted = sortListItems(ideas, sort.col, sort.dir, sort.col === 'category' ? 'priority' : 'category');
+
+      const tableHtml = sorted.length ? `
+        <table class="list-table">
+          <thead><tr>
+            <th class="sortable" onclick="setIdeaSort('id')">ID ${sortArrowHtml(sort,'id')}</th>
+            <th class="sortable" onclick="setIdeaSort('name')">Name ${sortArrowHtml(sort,'name')}</th>
+            <th class="sortable" onclick="setIdeaSort('category')">Category ${sortArrowHtml(sort,'category')}</th>
+            <th class="sortable" onclick="setIdeaSort('priority')">Priority ${sortArrowHtml(sort,'priority')}</th>
+          </tr></thead>
+          <tbody>
+            ${sorted.map(i => `<tr>
+              <td class="id-cell">${i.id}</td>
+              <td><a href="#" class="table-link" onclick="navigate('idea-detail',{id:'${i.id}'});return false;">${escHtml(i.name)}</a></td>
+              <td>${i.category ? escHtml((catMap[i.category] || '') + ' ' + i.category) : '<span class="dim">—</span>'}</td>
+              <td>${priorityBadge(i.priority)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      ` : '<p style="color:var(--text-muted);font-size:14px;margin-top:16px;">No ideas found.</p>';
+
+      el.innerHTML = `
+        <div class="page-header">
+          <span class="page-title">💡 Ideas</span>
+          <button class="btn btn-sm btn-primary" onclick="navigate('create-idea')">+ New</button>
+        </div>
+        ${tableHtml}
+      `;
+    } catch (e) {
+      el.innerHTML += `<p style="color:var(--danger)">Error: ${e.message}</p>`;
+    }
+  }
+
+  window.setIdeaSort = function(col) {
+    if (sort.col === col) sort.dir *= -1; else { sort.col = col; sort.dir = 1; }
+    render();
+  };
+
+  render();
+});
+
+// ---------------------------------------------------------------------------
+// Idea Detail view
+// ---------------------------------------------------------------------------
+register('idea-detail', async ({ id }) => {
+  const el = document.getElementById('main-content');
+  el.innerHTML = `<div class="spinner"></div>`;
+
+  try {
+    const idea = await api('GET', `/ideas/${id}`);
+    const canGraduate = idea.status !== 'Graduated' && idea.status !== 'Archived';
+
+    el.innerHTML = `
+      <div class="page-header">
+        <button class="btn btn-sm btn-ghost" onclick="goBack('ideas')">← Back</button>
+        <button class="btn btn-sm btn-secondary" onclick="navigate('edit-idea', {id:'${idea.id}'})">Edit</button>
+      </div>
+
+      <div class="card">
+        <div class="card-row" style="margin-bottom:8px;">
+          <h2 style="font-size:18px;font-weight:700;">${escHtml(idea.name)}</h2>
+          <div style="display:flex;gap:6px;flex-shrink:0;">${priorityBadge(idea.priority)}${statusBadge(idea.status)}</div>
+        </div>
+        <div class="card-meta">${idea.id}${idea.category ? ' · ' + escHtml(idea.category) : ''} · Created ${idea.created_at ? idea.created_at.slice(0, 10) : '—'}</div>
+        ${idea.graduated_goal_id ? `<div style="margin-top:8px;font-size:13px;color:var(--text-muted);">Graduated → <a href="#" onclick="navigate('goal-detail',{id:'${idea.graduated_goal_id}'})" style="color:var(--primary);">${idea.graduated_goal_id}</a></div>` : ''}
+        ${idea.description ? `<p style="font-size:14px;color:var(--text);margin-top:12px;line-height:1.6;">${escHtml(idea.description)}</p>` : ''}
+      </div>
+
+      <div class="section-header">📝 Progress Notes</div>
+      <div class="card" style="padding:10px 14px;margin-bottom:16px;">
+        <textarea
+          id="idea-notes-${idea.id}"
+          class="notes-textarea"
+          placeholder="Log your thinking here… (auto-saves on blur)"
+          onblur="saveIdeaNotes('${idea.id}')"
+        >${escHtml(idea.progress_notes || '')}</textarea>
+        <div id="idea-notes-status-${idea.id}" style="font-size:11px;color:var(--text-muted);text-align:right;margin-top:4px;min-height:14px;"></div>
+      </div>
+
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
+        ${canGraduate ? `<button class="btn btn-sm btn-primary" onclick="graduateIdea('${idea.id}')">🎓 Graduate to Goal</button>` : ''}
+        <select onchange="updateIdeaStatus('${idea.id}', this.value)" style="flex:1;min-width:130px;">
+          ${['Incubating', 'Active', 'Graduated', 'Archived'].map(s =>
+            `<option ${s === idea.status ? 'selected' : ''}>${s}</option>`
+          ).join('')}
+        </select>
+      </div>
+    `;
+  } catch (e) {
+    el.innerHTML = `<p style="color:var(--danger)">Error: ${e.message}</p>`;
+  }
+});
+
+window.saveIdeaNotes = async function(id) {
+  const ta = document.getElementById('idea-notes-' + id);
+  const statusEl = document.getElementById('idea-notes-status-' + id);
+  if (!ta) return;
+  try {
+    if (statusEl) statusEl.textContent = 'Saving…';
+    await api('PUT', `/ideas/${id}`, { progress_notes: ta.value });
+    if (statusEl) {
+      statusEl.textContent = 'Saved ✓';
+      setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 2000);
+    }
+  } catch (e) {
+    if (statusEl) statusEl.textContent = 'Error saving';
+    toast(`Error saving notes: ${e.message}`);
+  }
+};
+
+window.updateIdeaStatus = async function(id, status) {
+  try {
+    await api('PUT', `/ideas/${id}`, { status });
+    toast(`Status → ${status}`);
+    navigate('idea-detail', { id });
+  } catch (e) { toast(`Error: ${e.message}`); }
+};
+
+window.graduateIdea = async function(id) {
+  if (!confirm('Graduate this idea to a strategic goal?\n\nA new Backlog goal will be created from this idea.')) return;
+  try {
+    const res = await api('POST', `/ideas/${id}/graduate`);
+    toast('Graduated! Navigating to new goal…');
+    _navStack.length = 0;
+    navigate('goal-detail', { id: res.goal_id });
+  } catch (e) { toast(`Error: ${e.message}`); }
+};
+
+// ---------------------------------------------------------------------------
+// Create Idea view
+// ---------------------------------------------------------------------------
+register('create-idea', async () => {
+  const el = document.getElementById('main-content');
+  el.innerHTML = `<div class="page-header"><button class="btn btn-sm btn-ghost" onclick="goBack('ideas')">← Back</button><span class="page-title">New Idea</span></div><div class="spinner"></div>`;
+  const cats = await fetchCategories().catch(() => []);
+  el.innerHTML = `
+    <div class="page-header">
+      <button class="btn btn-sm btn-ghost" onclick="goBack('ideas')">← Back</button>
+      <span class="page-title">New Idea</span>
+    </div>
+    <div class="form-group"><label class="form-label">Name *</label><input type="text" id="i-name" placeholder="What's the idea?"></div>
+    <div class="form-group"><label class="form-label">Description</label><textarea id="i-desc" placeholder="Describe it…"></textarea></div>
+    <div class="form-group"><label class="form-label">Category</label>${categorySelectHtml(cats, '', 'i-category')}</div>
+    <div class="form-group"><label class="form-label">Priority</label>
+      <select id="i-priority">${['Critical', 'High', 'Medium', 'Low'].map(p => `<option ${p === 'Medium' ? 'selected' : ''}>${p}</option>`).join('')}</select>
+    </div>
+    <div class="form-group"><label class="form-label">Status</label>
+      <select id="i-status">${['Incubating', 'Active'].map(s => `<option ${s === 'Incubating' ? 'selected' : ''}>${s}</option>`).join('')}</select>
+    </div>
+    <button class="btn btn-primary btn-full" onclick="submitCreateIdea()">Save Idea</button>
+  `;
+});
+
+window.submitCreateIdea = async function() {
+  const name = document.getElementById('i-name').value.trim();
+  if (!name) { toast('Name is required'); return; }
+  try {
+    const idea = await api('POST', '/ideas', {
+      name,
+      description: document.getElementById('i-desc').value,
+      category: document.getElementById('i-category').value,
+      priority: document.getElementById('i-priority').value,
+      status: document.getElementById('i-status').value,
+    });
+    toast('Idea saved!');
+    navigate('idea-detail', { id: idea.id });
+  } catch (e) { toast(`Error: ${e.message}`); }
+};
+
+// ---------------------------------------------------------------------------
+// Edit Idea view
+// ---------------------------------------------------------------------------
+register('edit-idea', async ({ id }) => {
+  const el = document.getElementById('main-content');
+  el.innerHTML = `<div class="page-header"><button class="btn btn-sm btn-ghost" onclick="goBack()">← Back</button><span class="page-title">Edit Idea</span></div><div class="spinner"></div>`;
+
+  try {
+    const [idea, cats] = await Promise.all([api('GET', `/ideas/${id}`), fetchCategories().catch(() => [])]);
+    el.innerHTML = `
+      <div class="page-header">
+        <button class="btn btn-sm btn-ghost" onclick="goBack()">← Back</button>
+        <span class="page-title">Edit Idea</span>
+      </div>
+      <div class="form-group"><label class="form-label">Name *</label><input type="text" id="ei-name" value="${escHtml(idea.name || '')}"></div>
+      <div class="form-group"><label class="form-label">Description</label><textarea id="ei-desc">${escHtml(idea.description || '')}</textarea></div>
+      <div class="form-group"><label class="form-label">Progress Notes</label><textarea id="ei-notes" style="min-height:120px;">${escHtml(idea.progress_notes || '')}</textarea></div>
+      <div class="form-group"><label class="form-label">Category</label>${categorySelectHtml(cats, idea.category || '', 'ei-category')}</div>
+      <div class="form-group"><label class="form-label">Priority</label>
+        <select id="ei-priority">${['Critical', 'High', 'Medium', 'Low'].map(p => `<option ${p === idea.priority ? 'selected' : ''}>${p}</option>`).join('')}</select>
+      </div>
+      <div class="form-group"><label class="form-label">Status</label>
+        <select id="ei-status">${['Incubating', 'Active', 'Graduated', 'Archived'].map(s => `<option ${s === idea.status ? 'selected' : ''}>${s}</option>`).join('')}</select>
+      </div>
+      <button class="btn btn-primary btn-full" onclick="submitEditIdea('${idea.id}')">Save Changes</button>
+      <button class="btn btn-full" style="margin-top:8px;background:var(--danger);color:#fff;border:none;" onclick="deleteIdea('${idea.id}')">Delete Idea</button>
+    `;
+  } catch (e) {
+    el.innerHTML += `<p style="color:var(--danger)">Error: ${e.message}</p>`;
+  }
+});
+
+window.submitEditIdea = async function(id) {
+  const name = document.getElementById('ei-name').value.trim();
+  if (!name) { toast('Name is required'); return; }
+  try {
+    await api('PUT', `/ideas/${id}`, {
+      name,
+      description: document.getElementById('ei-desc').value,
+      progress_notes: document.getElementById('ei-notes').value,
+      category: document.getElementById('ei-category').value,
+      priority: document.getElementById('ei-priority').value,
+      status: document.getElementById('ei-status').value,
+    });
+    toast('Idea updated!');
+    navigate('idea-detail', { id });
+  } catch (e) { toast(`Error: ${e.message}`); }
+};
+
+window.deleteIdea = async function(id) {
+  try {
+    const idea = await api('GET', `/ideas/${id}`);
+    if (!confirm(`Delete "${idea.name}"?\n\nThis cannot be undone.`)) return;
+    await api('DELETE', `/ideas/${id}?confirmed=true`);
+    toast('Idea deleted');
+    _navStack.length = 0;
+    navigate('ideas');
+  } catch (e) { toast(`Error: ${e.message}`); }
+};
+
+// ---------------------------------------------------------------------------
 // Goals list view
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// List table sort helpers
+// ---------------------------------------------------------------------------
+const _PRIORITY_RANK = { Critical: 1, High: 2, Medium: 3, Low: 4 };
+const _STATUS_RANK = { Active: 1, Blocked: 2, Backlog: 3, Draft: 4, Completed: 5 };
+
+function sortListItems(items, col, dir, tiebreaker) {
+  function val(item, c) {
+    if (c === 'priority') return _PRIORITY_RANK[item.priority] || 99;
+    if (c === 'status') return _STATUS_RANK[item.status] || 99;
+    return (item[c] || '').toLowerCase();
+  }
+  return [...items].sort((a, b) => {
+    const av = val(a, col), bv = val(b, col);
+    if (av < bv) return -dir;
+    if (av > bv) return dir;
+    if (tiebreaker) {
+      const at = val(a, tiebreaker), bt = val(b, tiebreaker);
+      if (at < bt) return -1;
+      if (at > bt) return 1;
+    }
+    return 0;
+  });
+}
+
+function sortArrowHtml(sortState, col) {
+  if (sortState.col !== col) return '<span class="sort-arrow">⇅</span>';
+  return sortState.dir === 1 ? '<span class="sort-arrow active">▲</span>' : '<span class="sort-arrow active">▼</span>';
+}
+
 function buildTree(goals) {
   const map = {};
   const roots = [];
@@ -506,39 +1096,52 @@ register('goals', async () => {
   const el = document.getElementById('main-content');
   el.innerHTML = `<div class="page-header"><span class="page-title">🎯 Strategic Goals</span></div><div class="spinner"></div>`;
 
-  let filter = { status: null, horizon: null };
+  let sort = { col: 'category', dir: 1 };
 
   async function render() {
     try {
-      const params = new URLSearchParams();
-      if (filter.status) params.set('status', filter.status);
-      if (filter.horizon) params.set('horizon', filter.horizon);
-      const goals = await api('GET', `/goals?${params}`);
+      const [goals, cats] = await Promise.all([
+        api('GET', '/goals'),
+        fetchCategories().catch(() => []),
+      ]);
+      const catMap = Object.fromEntries(cats.map(c => [c.name, c.icon]));
+
+      const rootGoals = goals.filter(g => !g.parent_goal_id);
+      const sorted = sortListItems(rootGoals, sort.col, sort.dir, sort.col === 'category' ? 'status' : 'category');
+
+      const tableHtml = sorted.length ? `
+        <table class="list-table">
+          <thead><tr>
+            <th class="sortable" onclick="setGoalSort('id')">ID ${sortArrowHtml(sort,'id')}</th>
+            <th class="sortable" onclick="setGoalSort('name')">Name ${sortArrowHtml(sort,'name')}</th>
+            <th class="sortable" onclick="setGoalSort('category')">Category ${sortArrowHtml(sort,'category')}</th>
+            <th class="sortable" onclick="setGoalSort('status')">Status ${sortArrowHtml(sort,'status')}</th>
+          </tr></thead>
+          <tbody>
+            ${sorted.map(g => `<tr>
+              <td class="id-cell">${g.id}</td>
+              <td><a href="#" class="table-link" onclick="navigate('goal-detail',{id:'${g.id}'});return false;">${escHtml(g.name)}</a></td>
+              <td>${g.category ? escHtml((catMap[g.category] || '') + ' ' + g.category) : '<span class="dim">—</span>'}</td>
+              <td>${statusBadge(g.status)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      ` : '<p style="color:var(--text-muted);font-size:14px;margin-top:16px;">No goals found.</p>';
 
       el.innerHTML = `
         <div class="page-header">
           <span class="page-title">🎯 Strategic Goals</span>
           <button class="btn btn-sm btn-primary" onclick="navigate('create-goal')">+ New</button>
         </div>
-        <div class="filter-row">
-          ${['Active','Backlog','Blocked','Completed'].map(s =>
-            `<button class="filter-chip ${filter.status===s?'active':''}" onclick="setGoalFilter('status','${s}')">${s}</button>`
-          ).join('')}
-        </div>
-        <div class="filter-row">
-          ${['Daily','Weekly','Monthly','Quarterly','Yearly','Life'].map(h =>
-            `<button class="filter-chip ${filter.horizon===h?'active':''}" onclick="setGoalFilter('horizon','${h}')">${h}</button>`
-          ).join('')}
-        </div>
-        ${goals.length ? renderTree(buildTree(goals)) : '<p style="color:var(--text-muted);font-size:14px;margin-top:16px;">No goals found.</p>'}
+        ${tableHtml}
       `;
     } catch (e) {
       el.innerHTML += `<p style="color:var(--danger)">Error: ${e.message}</p>`;
     }
   }
 
-  window.setGoalFilter = function(key, val) {
-    if (filter[key] === val) filter[key] = null; else filter[key] = val;
+  window.setGoalSort = function(col) {
+    if (sort.col === col) sort.dir *= -1; else { sort.col = col; sort.dir = 1; }
     render();
   };
 
@@ -604,6 +1207,7 @@ register('goal-detail', async ({ id }) => {
           ? `<button class="btn btn-sm btn-ghost" onclick="promoteGoal('${goal.id}')">⬆ Promote</button>`
           : `<button class="btn btn-sm btn-ghost" onclick="demoteGoal('${goal.id}')">⬇ Demote</button>`
         }
+        <button class="btn btn-sm btn-ghost" onclick="demoteGoalToIdea('${goal.id}')">💡 Demote to Idea</button>
         <select onchange="updateStatus('${goal.id}',this.value)" style="flex:1;min-width:120px;">
           ${['Draft','Backlog','Active','Blocked','Completed'].map(s =>
             `<option ${s===goal.status?'selected':''}>${s}</option>`
@@ -688,11 +1292,24 @@ window.demoteGoal = async function(id) {
   } catch (e) { toast(`Error: ${e.message}`); }
 };
 
+window.demoteGoalToIdea = async function(id) {
+  try {
+    const goal = await api('GET', `/goals/${id}`);
+    if (!confirm(`Demote "${goal.name}" to an Idea?\n\nThe goal will be deleted and an idea will be created from it.`)) return;
+    const res = await api('POST', `/goals/${id}/demote-to-idea`);
+    toast('Demoted to Idea!');
+    _navStack.length = 0;
+    navigate('idea-detail', { id: res.idea_id });
+  } catch (e) { toast(`Error: ${e.message}`); }
+};
+
 // ---------------------------------------------------------------------------
 // Create Goal view
 // ---------------------------------------------------------------------------
-register('create-goal', ({ parentId } = {}) => {
+register('create-goal', async ({ parentId } = {}) => {
   const el = document.getElementById('main-content');
+  el.innerHTML = `<div class="page-header"><button class="btn btn-sm btn-ghost" onclick="goBack()">← Back</button><span class="page-title">New Goal</span></div><div class="spinner"></div>`;
+  const cats = await fetchCategories().catch(() => []);
   el.innerHTML = `
     <div class="page-header">
       <button class="btn btn-sm btn-ghost" onclick="goBack()">← Back</button>
@@ -704,7 +1321,7 @@ register('create-goal', ({ parentId } = {}) => {
       <select id="g-horizon">${['Daily','Weekly','Monthly','Quarterly','Yearly','Life'].map(h=>`<option>${h}</option>`).join('')}</select>
     </div>
     <div class="form-group"><label class="form-label">Due Date</label><input type="date" id="g-due"></div>
-    <div class="form-group"><label class="form-label">Category</label><input type="text" id="g-cat" placeholder="e.g. Health, Work, Learning"></div>
+    <div class="form-group"><label class="form-label">Category</label>${categorySelectHtml(cats, '', 'g-cat')}</div>
     ${parentId ? `<input type="hidden" id="g-parent" value="${parentId}">` : ''}
     <button class="btn btn-primary btn-full" onclick="submitCreateGoal()">Create Goal</button>
   `;
@@ -742,7 +1359,7 @@ register('edit-goal', async ({ id }) => {
   el.innerHTML = `<div class="page-header"><button class="btn btn-sm btn-ghost" onclick="goBack()">← Back</button><span class="page-title">Edit Goal</span></div><div class="spinner"></div>`;
 
   try {
-    const goal = await api('GET', `/goals/${id}`);
+    const [goal, cats] = await Promise.all([api('GET', `/goals/${id}`), fetchCategories().catch(() => [])]);
     el.innerHTML = `
       <div class="page-header">
         <button class="btn btn-sm btn-ghost" onclick="goBack()">← Back</button>
@@ -757,11 +1374,11 @@ register('edit-goal', async ({ id }) => {
         <select id="eg-status">${['Draft','Backlog','Active','Blocked','Completed'].map(s=>`<option ${goal.status===s?'selected':''}>${s}</option>`).join('')}</select>
       </div>
       <div class="form-group"><label class="form-label">Due Date</label><input type="date" id="eg-due" value="${goal.due_date || ''}"></div>
-      <div class="form-group"><label class="form-label">Category</label><input type="text" id="eg-cat" value="${escHtml(goal.category || '')}"></div>
+      <div class="form-group"><label class="form-label">Category</label>${categorySelectHtml(cats, goal.category || '', 'eg-cat')}</div>
       <div class="form-group"><label class="form-label">Notify Before (days)</label><input type="number" id="eg-notify" value="${goal.notify_before_days ?? 3}" min="0"></div>
       <div class="form-group"><label class="form-label">📝 Progress Notes</label><textarea id="eg-notes" placeholder="Log your progress…" style="min-height:140px;">${escHtml(goal.progress_notes || '')}</textarea></div>
       <button class="btn btn-primary btn-full" onclick="submitEditGoal('${goal.id}')">Save Changes</button>
-      <button class="btn btn-full" style="margin-top:8px;background:var(--danger);color:#fff;border:none;" onclick="deleteGoal('${goal.id}', '${escHtml(goal.name)}')">Delete Goal</button>
+      <button class="btn btn-full" style="margin-top:8px;background:var(--danger);color:#fff;border:none;" onclick="deleteGoal('${goal.id}')">Delete Goal</button>
     `;
   } catch (e) {
     el.innerHTML += `<p style="color:var(--danger)">Error: ${e.message}</p>`;
@@ -788,9 +1405,10 @@ window.submitEditGoal = async function(id) {
   } catch (e) { toast(`Error: ${e.message}`); }
 };
 
-window.deleteGoal = async function(id, name) {
-  if (!confirm(`Delete "${name}"?\n\nThis cannot be undone.`)) return;
+window.deleteGoal = async function(id) {
   try {
+    const goal = await api('GET', `/goals/${id}`);
+    if (!confirm(`Delete "${goal.name}"?\n\nThis cannot be undone.`)) return;
     await api('DELETE', `/goals/${id}`);
     toast('Goal deleted');
     // Pop back past the detail view to goals list
@@ -1039,14 +1657,15 @@ register('more', () => {
   el.innerHTML = `
     <div class="page-header"><span class="page-title">⋯ More</span></div>
     ${[
-      ['📺', 'TV Dashboard', 'tv'],
-      ['📥', 'Inbox', 'inbox'],
-      ['📸', 'Capture', 'capture'],
-      ['⚙️', 'Config', 'config'],
-      ['⏱', 'Jobs', 'jobs'],
-      ['📋', 'Logs', 'logs'],
-    ].map(([icon, label, view]) => `
-      <div class="card" onclick="navigate('${view}')" style="cursor:pointer;display:flex;align-items:center;gap:14px;">
+      ['📺', 'TV Dashboard', "navigate('tv')"],
+      ['📥', 'Inbox', "navigate('inbox')"],
+      ['📸', 'Capture', "navigate('capture')"],
+      ['🏷️', 'Categories', "openManageCategoriesModal()"],
+      ['⚙️', 'Config', "navigate('config')"],
+      ['⏱', 'Jobs', "navigate('jobs')"],
+      ['📋', 'Logs', "navigate('logs')"],
+    ].map(([icon, label, onclick]) => `
+      <div class="card" onclick="${onclick}" style="cursor:pointer;display:flex;align-items:center;gap:14px;">
         <span style="font-size:28px;">${icon}</span>
         <span style="font-size:16px;font-weight:600;">${label}</span>
         <span style="margin-left:auto;color:var(--text-muted);">›</span>
@@ -1421,12 +2040,13 @@ register('tv', async () => {
 
   async function refreshTV() {
     try {
-      const [goals, dailyData] = await Promise.all([
+      const [goals, dailyData, topIdeas] = await Promise.all([
         api('GET', '/goals'),
         api('GET', '/daily?days=1'),
+        api('GET', '/ideas/top?n=5'),
       ]);
       window._tvLastRefresh = Date.now();
-      mc.innerHTML = buildTvHTML(goals, dailyData);
+      mc.innerHTML = buildTvHTML(goals, dailyData, topIdeas);
     } catch (e) {
       mc.innerHTML = `
         <div class="tv-shell">
@@ -1457,7 +2077,7 @@ register('tv', async () => {
   window._tvInterval = setInterval(refreshTV, 60000);
 });
 
-function buildTvHTML(goals, dailyData) {
+function buildTvHTML(goals, dailyData, topIdeas = []) {
   const today = localDateStr();
   const in7 = localDateStr(7);
 
@@ -1505,6 +2125,7 @@ function buildTvHTML(goals, dailyData) {
         ${buildTvTodayCol(dailyItems, doneCount, totalCount, pct)}
         ${buildTvGoalsCol(goals)}
         ${buildTvUpcomingCol(dueThisWeek, overdue, today)}
+        ${buildTvIdeasCol(topIdeas)}
       </main>
       <footer class="tv-footer">
         <span>Updated ${new Date().toLocaleTimeString()}</span>
@@ -1638,6 +2259,29 @@ function buildTvUpcomingCol(dueThisWeek, overdue, today) {
         <div class="tv-section-label" style="color:#f87171;margin-top:20px;">🚨 OVERDUE</div>
         ${overdueHtml}
       ` : ''}
+    </section>`;
+}
+
+function buildTvIdeasCol(ideas) {
+  const PRIORITY_COLORS = { Critical: '#fca5a5', High: '#fdba74', Medium: '#60a5fa', Low: '#94a3b8' };
+
+  const listHtml = ideas.length
+    ? ideas.map(idea => {
+        const color = PRIORITY_COLORS[idea.priority] || '#94a3b8';
+        return `<div class="tv-due-item">
+          <div style="display:flex;align-items:baseline;gap:8px;">
+            <span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:${color};flex-shrink:0;">${idea.priority}</span>
+            <div class="tv-due-name" style="font-size:15px;">${escHtml(idea.name)}</div>
+          </div>
+          ${idea.status !== 'Incubating' ? `<div class="tv-due-meta" style="color:var(--text-muted);">${idea.status}</div>` : ''}
+        </div>`;
+      }).join('')
+    : '<div style="color:var(--text-muted);font-style:italic;font-size:14px;">No active ideas</div>';
+
+  return `
+    <section class="tv-col">
+      <div class="tv-col-header">💡 TOP IDEAS</div>
+      ${listHtml}
     </section>`;
 }
 

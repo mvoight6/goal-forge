@@ -264,6 +264,16 @@ def demote_goal_api(goal_id: str, token: str = Depends(_auth)):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.post("/goals/{goal_id}/demote-to-idea")
+def demote_goal_to_idea_api(goal_id: str, token: str = Depends(_auth)):
+    """Convert a strategic goal to an idea, then delete the goal."""
+    from goalforge.vault_tools import demote_goal_to_idea
+    try:
+        return demote_goal_to_idea(goal_id)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("/search")
 def search_api(q: str, token: str = Depends(_auth)):
     """Search goals by name or description."""

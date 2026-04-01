@@ -110,6 +110,64 @@ def _ensure_schema(db: sqlite_utils.Database):
         END
     """)
 
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS ideas (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            progress_notes TEXT DEFAULT '',
+            status TEXT DEFAULT 'Incubating',
+            priority TEXT DEFAULT 'Medium',
+            category TEXT DEFAULT '',
+            graduated_goal_id TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Migrate category onto existing ideas tables that predate this column
+    try:
+        db.execute("ALTER TABLE ideas ADD COLUMN category TEXT DEFAULT ''")
+        db.conn.commit()
+    except Exception:
+        pass  # Column already exists
+
+    # Drop and recreate trigger so category changes also bump updated_at
+    db.execute("DROP TRIGGER IF EXISTS ideas_updated")
+    db.execute("""
+        CREATE TRIGGER ideas_updated
+        AFTER UPDATE OF name, description, progress_notes, status, priority, category, graduated_goal_id
+        ON ideas
+        BEGIN
+            UPDATE ideas SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+        END
+    """)
+
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            icon TEXT DEFAULT '🏷️',
+            sort_order INTEGER DEFAULT 0
+        )
+    """)
+    row = db.execute("SELECT COUNT(*) FROM categories").fetchone()
+    if row[0] == 0:
+        db.execute("INSERT INTO categories (name, icon, sort_order) VALUES (?, ?, ?)", ['Personal', '🏠', 0])
+        db.execute("INSERT INTO categories (name, icon, sort_order) VALUES (?, ?, ?)", ['Work', '💼', 1])
+        # Wipe user freeform categories but preserve the system 'Daily' marker
+        db.execute("UPDATE goals SET category = NULL WHERE category != 'Daily'")
+        db.execute("UPDATE ideas SET category = '' WHERE category IS NOT NULL")
+
+    # Repair: restore 'Daily' on any daily goals whose category was previously wiped
+    db.execute("""
+        UPDATE goals SET category = 'Daily'
+        WHERE category IS NULL AND (
+            name LIKE 'Daily Goals ____-__-__'
+            OR parent_goal_id IN (SELECT id FROM goals WHERE name LIKE 'Daily Goals ____-__-__')
+        )
+    """)
+
     db.conn.commit()
     logger.debug("Schema ensured.")
 
@@ -501,3 +559,157 @@ def get_recently_completed(limit: int = 5) -> list[dict]:
     ).fetchall()
     cols = [d[0] for d in db.execute("SELECT * FROM goals LIMIT 0").description]
     return [dict(zip(cols, r)) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Ideas helpers
+# ---------------------------------------------------------------------------
+
+_PRIORITY_ORDER = "CASE priority WHEN 'Critical' THEN 1 WHEN 'High' THEN 2 WHEN 'Medium' THEN 3 WHEN 'Low' THEN 4 ELSE 5 END"
+
+
+def get_idea(idea_id: str) -> Optional[dict]:
+    db = get_db()
+    row = db.execute("SELECT * FROM ideas WHERE id = ?", [idea_id]).fetchone()
+    if not row:
+        return None
+    cols = [d[0] for d in db.execute("SELECT * FROM ideas LIMIT 0").description]
+    return dict(zip(cols, row))
+
+
+def upsert_idea(idea_dict: dict):
+    """Insert or update an idea. Preserves created_at on update."""
+    db = get_db()
+    idea_id = idea_dict.get("id")
+    if not idea_id:
+        raise ValueError("Idea dict must have an 'id' field")
+    db.conn.execute(
+        """
+        INSERT INTO ideas (id, name, description, progress_notes, status, priority, category, graduated_goal_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            description = excluded.description,
+            progress_notes = excluded.progress_notes,
+            status = excluded.status,
+            priority = excluded.priority,
+            category = excluded.category,
+            graduated_goal_id = excluded.graduated_goal_id
+        """,
+        [
+            idea_id,
+            idea_dict.get("name", "Untitled"),
+            idea_dict.get("description", ""),
+            idea_dict.get("progress_notes", ""),
+            idea_dict.get("status", "Incubating"),
+            idea_dict.get("priority", "Medium"),
+            idea_dict.get("category", ""),
+            idea_dict.get("graduated_goal_id"),
+        ],
+    )
+    db.conn.commit()
+
+
+def get_ideas(status: str = None, priority: str = None, category: str = None) -> list[dict]:
+    db = get_db()
+    where = ["1=1"]
+    params = []
+    if status:
+        where.append("status = ?")
+        params.append(status)
+    if priority:
+        where.append("priority = ?")
+        params.append(priority)
+    if category:
+        where.append("category = ?")
+        params.append(category)
+    sql = f"SELECT * FROM ideas WHERE {' AND '.join(where)} ORDER BY {_PRIORITY_ORDER} ASC, created_at DESC"
+    rows = db.execute(sql, params).fetchall()
+    cols = [d[0] for d in db.execute("SELECT * FROM ideas LIMIT 0").description]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def get_top_ideas(n: int = 5) -> list[dict]:
+    """Top N non-graduated/archived ideas by priority then newest first."""
+    db = get_db()
+    rows = db.execute(
+        f"SELECT * FROM ideas WHERE status NOT IN ('Graduated', 'Archived') ORDER BY {_PRIORITY_ORDER} ASC, created_at DESC LIMIT ?",
+        [n]
+    ).fetchall()
+    cols = [d[0] for d in db.execute("SELECT * FROM ideas LIMIT 0").description]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def delete_idea(idea_id: str):
+    db = get_db()
+    db.execute("DELETE FROM ideas WHERE id = ?", [idea_id])
+    db.conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Categories helpers
+# ---------------------------------------------------------------------------
+
+def get_categories() -> list[dict]:
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, name, icon, sort_order FROM categories ORDER BY sort_order ASC, id ASC"
+    ).fetchall()
+    return [{"id": r[0], "name": r[1], "icon": r[2], "sort_order": r[3]} for r in rows]
+
+
+def get_category(cat_id: int) -> Optional[dict]:
+    db = get_db()
+    row = db.execute(
+        "SELECT id, name, icon, sort_order FROM categories WHERE id = ?", [cat_id]
+    ).fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "name": row[1], "icon": row[2], "sort_order": row[3]}
+
+
+def create_category(name: str, icon: str) -> Optional[dict]:
+    db = get_db()
+    try:
+        db.conn.execute(
+            "INSERT INTO categories (name, icon, sort_order) "
+            "VALUES (?, ?, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM categories))",
+            [name, icon]
+        )
+        db.conn.commit()
+        row = db.conn.execute(
+            "SELECT id, name, icon, sort_order FROM categories WHERE name = ?", [name]
+        ).fetchone()
+        return {"id": row[0], "name": row[1], "icon": row[2], "sort_order": row[3]}
+    except Exception:
+        return None  # Duplicate name
+
+
+def update_category(cat_id: int, name: Optional[str], icon: Optional[str]):
+    db = get_db()
+    if name is not None:
+        old = db.execute("SELECT name FROM categories WHERE id = ?", [cat_id]).fetchone()
+        if old and old[0] != name:
+            db.execute("UPDATE goals SET category = ? WHERE category = ?", [name, old[0]])
+            db.execute("UPDATE ideas SET category = ? WHERE category = ?", [name, old[0]])
+        db.execute("UPDATE categories SET name = ? WHERE id = ?", [name, cat_id])
+    if icon is not None:
+        db.execute("UPDATE categories SET icon = ? WHERE id = ?", [icon, cat_id])
+    db.conn.commit()
+
+
+def delete_category(cat_id: int):
+    db = get_db()
+    row = db.execute("SELECT name FROM categories WHERE id = ?", [cat_id]).fetchone()
+    if row:
+        db.execute("UPDATE goals SET category = NULL WHERE category = ?", [row[0]])
+        db.execute("UPDATE ideas SET category = '' WHERE category = ?", [row[0]])
+    db.execute("DELETE FROM categories WHERE id = ?", [cat_id])
+    db.conn.commit()
+
+
+def set_category_order(ids: list):
+    db = get_db()
+    for i, cat_id in enumerate(ids):
+        db.execute("UPDATE categories SET sort_order = ? WHERE id = ?", [i, cat_id])
+    db.conn.commit()

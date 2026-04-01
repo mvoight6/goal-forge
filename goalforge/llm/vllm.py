@@ -19,7 +19,14 @@ def _strip_thinking(text: str) -> str:
 
 def _parse_xml_tool_calls(content: str) -> list[ToolCall]:
     """
-    Parse the XML tool-call format some models emit:
+    Parse tool-call blocks the model emits as text. Handles two formats:
+
+    JSON format (Qwen3-30B-A3B and others):
+      <tool_call>
+      {"name": "fn_name", "arguments": {...}}
+      </tool_call>
+
+    XML parameter format (older models):
       <tool_call>
       <function=name>
       <parameter=key>value</parameter>
@@ -29,9 +36,21 @@ def _parse_xml_tool_calls(content: str) -> list[ToolCall]:
     tool_calls = []
     for block in re.finditer(r"<tool_call>(.*?)</tool_call>", content, re.DOTALL):
         inner = block.group(1).strip()
+
+        # Try JSON format first
+        try:
+            parsed = json.loads(inner)
+            fn_name = parsed.get("name") or parsed.get("function")
+            if fn_name:
+                args = parsed.get("arguments") or parsed.get("parameters") or {}
+                tool_calls.append(ToolCall(id=f"xml_{fn_name}_{len(tool_calls)}", name=fn_name, arguments=args))
+                continue
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+        # Fall back to XML parameter format
         fn_match = re.match(r"<function=(\S+?)>(.*?)</function>", inner, re.DOTALL)
         if not fn_match:
-            # Try alternate: <function=name/> with params outside
             fn_match = re.match(r"<function=(\S+?)>(.*)", inner, re.DOTALL)
         if not fn_match:
             continue
@@ -41,7 +60,6 @@ def _parse_xml_tool_calls(content: str) -> list[ToolCall]:
         for pm in re.finditer(r"<parameter=(\w+)>\s*(.*?)\s*</parameter>", fn_body, re.DOTALL):
             key = pm.group(1)
             raw = pm.group(2).strip()
-            # Coerce types
             if raw.lower() == "true":
                 params[key] = True
             elif raw.lower() == "false":

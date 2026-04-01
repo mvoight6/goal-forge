@@ -32,14 +32,22 @@ def next_id(db_conn) -> str:
             import sqlite3
             import sqlite_utils
 
+            rows = []
             if isinstance(db_conn, sqlite_utils.Database):
-                rows = db_conn.execute("SELECT id FROM goals").fetchall()
+                rows += db_conn.execute("SELECT id FROM goals").fetchall()
+                try:
+                    rows += db_conn.execute("SELECT id FROM ideas").fetchall()
+                except Exception:
+                    pass
             elif isinstance(db_conn, sqlite3.Connection):
                 cursor = db_conn.cursor()
                 cursor.execute("SELECT id FROM goals")
-                rows = cursor.fetchall()
-            else:
-                rows = []
+                rows += cursor.fetchall()
+                try:
+                    cursor.execute("SELECT id FROM ideas")
+                    rows += cursor.fetchall()
+                except Exception:
+                    pass
 
             max_num = 0
             for row in rows:
