@@ -276,104 +276,83 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "list_ideas",
-            "description": "List ideas, optionally filtered by status or priority",
+            "name": "list_lists",
+            "description": "Return all lists with their item counts",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_list",
+            "description": "Read a list and all its items by list ID (e.g. GF-0042)",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "status": {"type": "string", "enum": ["Incubating", "Active", "Graduated", "Archived"]},
-                    "priority": {"type": "string", "enum": ["Critical", "High", "Medium", "Low"]},
+                    "list_id": {"type": "string", "description": "List ID (GF-XXXX)"},
                 },
+                "required": ["list_id"],
             },
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "read_idea",
-            "description": "Read an idea's full details by ID (e.g. GF-0042) or partial name",
+            "name": "create_list_item",
+            "description": "Add a new item to an existing list",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "id_or_name": {"type": "string", "description": "Idea ID or partial name to search for"}
+                    "list_id": {"type": "string", "description": "ID of the list to add to"},
+                    "content": {"type": "string", "description": "Text content of the item"},
+                    "note": {"type": "string", "description": "Optional note or description for the item"},
                 },
-                "required": ["id_or_name"],
+                "required": ["list_id", "content"],
             },
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "create_idea",
-            "description": "Create a new idea to capture and cultivate. Use this — NOT create_goal — when the user wants to explore a thought that isn't yet a committed goal.",
+            "name": "update_list_item",
+            "description": "Update a list item's content, checked state, or note",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Short name for the idea"},
-                    "description": {"type": "string", "description": "Longer description or initial thinking"},
-                    "priority": {"type": "string", "enum": ["Critical", "High", "Medium", "Low"], "description": "Default: Medium"},
-                    "status": {"type": "string", "enum": ["Incubating", "Active"], "description": "Default: Incubating"},
-                    "category": {"type": "string", "description": "Optional grouping category (e.g. Health, Tech, Business)"},
+                    "item_id": {"type": "string"},
+                    "content": {"type": "string"},
+                    "checked": {"type": "boolean"},
+                    "note": {"type": "string"},
                 },
-                "required": ["name"],
+                "required": ["item_id"],
             },
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "update_idea_field",
-            "description": "Update a single field on an idea (name, description, progress_notes, status, priority, category)",
+            "name": "graduate_list_item",
+            "description": "Promote a list item to a strategic goal (Backlog status). Ask the user to confirm before calling with confirmed=true.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "idea_id": {"type": "string"},
-                    "field": {"type": "string", "enum": ["name", "description", "progress_notes", "status", "priority", "category"]},
-                    "value": {"type": "string"},
-                },
-                "required": ["idea_id", "field", "value"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "graduate_idea",
-            "description": "Promote an idea to a strategic goal (Backlog status). Ask the user to confirm before calling with confirmed=true.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "idea_id": {"type": "string"},
+                    "item_id": {"type": "string"},
                     "confirmed": {"type": "boolean", "description": "Must be true — only set after user explicitly confirms"},
                 },
-                "required": ["idea_id", "confirmed"],
+                "required": ["item_id", "confirmed"],
             },
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "delete_idea",
-            "description": "Delete an idea. Ask the user to confirm before calling with confirmed=true.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "idea_id": {"type": "string"},
-                    "confirmed": {"type": "boolean", "description": "Must be true — only set after user explicitly confirms"},
-                },
-                "required": ["idea_id", "confirmed"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "demote_goal_to_idea",
-            "description": "Convert a strategic goal back to an idea. The goal is deleted and an idea is created from it. Ask the user to confirm first.",
+            "name": "demote_goal_to_list",
+            "description": "Convert a strategic goal to a list item, then delete the goal. Optionally specify a list_id; defaults to the 'Ideas' list.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "goal_id": {"type": "string", "description": "ID of the strategic goal to demote"},
+                    "list_id": {"type": "string", "description": "Optional: target list ID. Defaults to 'Ideas' list."},
                 },
                 "required": ["goal_id"],
             },
@@ -384,25 +363,24 @@ TOOL_SCHEMAS = [
 # Map tool names to vault_tools functions
 # Note: interactive.py uses goal_id as the param name; vault_tools uses id_or_name or goal_id depending on function
 TOOL_DISPATCH = {
-    "read_goal":           lambda a: vault_tools.read_goal(**a),
-    "list_goals":          lambda a: vault_tools.list_goals(**a),
-    "get_goal_tree":       lambda a: vault_tools.get_goal_tree(**a),
-    "get_ancestors":       lambda a: vault_tools.get_ancestors(**a),
-    "update_goal_field":   lambda a: vault_tools.update_goal_field(**_remap(a, "goal_id", "goal_id")),
-    "promote_to_full_goal":lambda a: vault_tools.promote_to_full_goal(**_remap(a, "goal_id", "goal_id")),
-    "demote_to_milestone": lambda a: vault_tools.demote_to_milestone(**_remap(a, "goal_id", "goal_id")),
-    "reparent_goal":       lambda a: vault_tools.reparent_goal(**_remap(a, "goal_id", "goal_id")),
-    "create_goal":         lambda a: vault_tools.create_goal(**a),
-    "create_daily_item":   lambda a: daily_api.add_daily_item_for_date(**a),
-    "delete_goal":         lambda a: vault_tools.delete_goal(**_remap(a, "goal_id", "goal_id")),
-    "search_goals":        lambda a: vault_tools.search_goals(**a),
-    "list_ideas":          lambda a: vault_tools.list_ideas(**a),
-    "read_idea":           lambda a: vault_tools.read_idea(**a),
-    "create_idea":         lambda a: vault_tools.create_idea(**a),
-    "update_idea_field":   lambda a: vault_tools.update_idea_field(**a),
-    "graduate_idea":       lambda a: vault_tools.graduate_idea(**a),
-    "delete_idea":         lambda a: vault_tools.delete_idea(**a),
-    "demote_goal_to_idea": lambda a: vault_tools.demote_goal_to_idea(**a),
+    "read_goal":            lambda a: vault_tools.read_goal(**a),
+    "list_goals":           lambda a: vault_tools.list_goals(**a),
+    "get_goal_tree":        lambda a: vault_tools.get_goal_tree(**a),
+    "get_ancestors":        lambda a: vault_tools.get_ancestors(**a),
+    "update_goal_field":    lambda a: vault_tools.update_goal_field(**_remap(a, "goal_id", "goal_id")),
+    "promote_to_full_goal": lambda a: vault_tools.promote_to_full_goal(**_remap(a, "goal_id", "goal_id")),
+    "demote_to_milestone":  lambda a: vault_tools.demote_to_milestone(**_remap(a, "goal_id", "goal_id")),
+    "reparent_goal":        lambda a: vault_tools.reparent_goal(**_remap(a, "goal_id", "goal_id")),
+    "create_goal":          lambda a: vault_tools.create_goal(**a),
+    "create_daily_item":    lambda a: daily_api.add_daily_item_for_date(**a),
+    "delete_goal":          lambda a: vault_tools.delete_goal(**_remap(a, "goal_id", "goal_id")),
+    "search_goals":         lambda a: vault_tools.search_goals(**a),
+    "list_lists":           lambda a: vault_tools.list_lists_tool(**a),
+    "read_list":            lambda a: vault_tools.read_list(**a),
+    "create_list_item":     lambda a: vault_tools.create_list_item_tool(**a),
+    "update_list_item":     lambda a: vault_tools.update_list_item_tool(**a),
+    "graduate_list_item":   lambda a: vault_tools.graduate_list_item(**a),
+    "demote_goal_to_list":  lambda a: vault_tools.demote_goal_to_list(**a),
 }
 
 

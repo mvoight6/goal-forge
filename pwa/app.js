@@ -136,8 +136,8 @@ function buildShell() {
       <button class="nav-btn" data-view="daily" onclick="navigate('daily')">
         <span class="icon">📋</span>Daily
       </button>
-      <button class="nav-btn" data-view="ideas" onclick="navigate('ideas')">
-        <span class="icon">💡</span>Ideas
+      <button class="nav-btn" data-view="lists" onclick="navigate('lists')">
+        <span class="icon">📋</span>Lists
       </button>
       <button class="nav-btn" data-view="goals" onclick="navigate('goals')">
         <span class="icon">🎯</span>Strategic
@@ -448,11 +448,11 @@ register('dashboard', async () => {
   el.innerHTML = `<div class="page-header"><span class="page-title">⚒️ Goal Forge</span><button class="btn btn-sm btn-ghost" onclick="navigate('dashboard')">↺</button></div><div class="spinner"></div>`;
 
   try {
-    const [goals, inbox, dailyData, topIdeas] = await Promise.all([
+    const [goals, inbox, dailyData, recentLists] = await Promise.all([
       api('GET', '/goals'),
       api('GET', '/inbox'),
       api('GET', '/daily?days=1'),
-      api('GET', '/ideas/top?n=5'),
+      api('GET', '/lists/recent?n=5'),
     ]);
 
     const today = localDateStr();
@@ -494,12 +494,12 @@ register('dashboard', async () => {
         ${rootBacklog.map(g => goalCard(g)).join('')}
       ` : ''}
 
-      ${topIdeas.length ? `
+      ${recentLists.length ? `
         <div class="section-header" style="display:flex;align-items:center;justify-content:space-between;">
-          <span>💡 Top Ideas</span>
-          <button class="btn btn-sm btn-ghost" onclick="navigate('ideas')">View All</button>
+          <span>📋 Recent Lists</span>
+          <button class="btn btn-sm btn-ghost" onclick="navigate('lists')">View All</button>
         </div>
-        ${topIdeas.map(i => ideaCard(i, true)).join('')}
+        ${recentLists.map(l => listDashCard(l)).join('')}
       ` : ''}
 
       ${inbox.length ? `
@@ -532,14 +532,21 @@ function priorityBadge(priority) {
   return `<span class="badge badge-priority-${map[priority] || 'medium'}">${priority || 'Medium'}</span>`;
 }
 
-function ideaCard(idea, compact = false) {
-  return `<div class="card" onclick="navigate('idea-detail', {id:'${idea.id}'})" style="cursor:pointer;">
+function listDashCard(lst) {
+  const accent = _listAccentStyle(lst.color);
+  const remaining = lst.total_items - lst.checked_items;
+  const countStr = lst.total_items
+    ? `${remaining} of ${lst.total_items} remaining`
+    : 'Empty list';
+  const previewHtml = (lst.preview_items || []).slice(0, 3)
+    .map(t => `<div style="font-size:12px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">· ${escHtml(t)}</div>`)
+    .join('');
+  return `<div class="card" onclick="navigate('list-detail',{id:'${lst.id}'})" style="cursor:pointer;${accent}">
     <div class="card-row">
-      <span class="card-title">${escHtml(idea.name)}</span>
-      <div style="display:flex;gap:6px;flex-shrink:0;">${priorityBadge(idea.priority)}${statusBadge(idea.status)}</div>
+      <span class="card-title">${escHtml(lst.name)}</span>
+      <span style="font-size:12px;color:var(--text-muted);flex-shrink:0;">${countStr}</span>
     </div>
-    ${!compact && idea.description ? `<div style="font-size:13px;color:var(--text-muted);margin-top:6px;line-height:1.4;">${escHtml(idea.description.slice(0, 120))}${idea.description.length > 120 ? '…' : ''}</div>` : ''}
-    <div class="card-meta" style="margin-top:4px;">${idea.id}${idea.category ? ' · ' + escHtml(idea.category) : ''} · ${idea.created_at ? idea.created_at.slice(0, 10) : ''}</div>
+    ${previewHtml}
   </div>`;
 }
 
@@ -770,247 +777,714 @@ register('daily', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Ideas list view
+// Lists — colour helpers
 // ---------------------------------------------------------------------------
-register('ideas', async () => {
-  const el = document.getElementById('main-content');
-  el.innerHTML = `<div class="page-header"><span class="page-title">💡 Ideas</span></div><div class="spinner"></div>`;
+const LIST_SWATCH_MAP = {
+  red:'#ef4444',orange:'#f97316',yellow:'#eab308',green:'#22c55e',
+  teal:'#14b8a6',blue:'#3b82f6',purple:'#a855f7',pink:'#ec4899',gray:'#6b7280',
+};
+// Subtle tinted backgrounds for cards (dark-mode friendly)
+const LIST_CARD_BG_MAP = {
+  red:    'background:rgba(239,68,68,0.1);border-color:rgba(239,68,68,0.45);',
+  orange: 'background:rgba(249,115,22,0.1);border-color:rgba(249,115,22,0.45);',
+  yellow: 'background:rgba(234,179,8,0.1);border-color:rgba(234,179,8,0.45);',
+  green:  'background:rgba(34,197,94,0.1);border-color:rgba(34,197,94,0.45);',
+  teal:   'background:rgba(20,184,166,0.1);border-color:rgba(20,184,166,0.45);',
+  blue:   'background:rgba(59,130,246,0.1);border-color:rgba(59,130,246,0.45);',
+  purple: 'background:rgba(168,85,247,0.1);border-color:rgba(168,85,247,0.45);',
+  pink:   'background:rgba(236,72,153,0.1);border-color:rgba(236,72,153,0.45);',
+  gray:   'background:rgba(107,114,128,0.1);border-color:rgba(107,114,128,0.45);',
+};
 
-  let sort = { col: 'category', dir: 1 };
+function _listAccentStyle(color) {
+  // Used by search results / dashboard cards — left-border accent
+  return color && LIST_SWATCH_MAP[color] ? `border-left:3px solid ${LIST_SWATCH_MAP[color]};` : '';
+}
+
+function _listCardStyle(color) {
+  return (color && LIST_CARD_BG_MAP[color]) ? LIST_CARD_BG_MAP[color] : '';
+}
+
+function _colorSwatchesHtml(selectedColor, onchangeFn) {
+  const noneStyle = !selectedColor || selectedColor === 'default'
+    ? 'outline:2px solid var(--primary);' : '';
+  let html = `<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:4px;">
+    <div onclick="${onchangeFn}('')" title="Default" style="width:28px;height:28px;border-radius:50%;background:var(--surface2);cursor:pointer;${noneStyle}border:2px solid var(--border);"></div>`;
+  for (const [name, hex] of Object.entries(LIST_SWATCH_MAP)) {
+    const sel = selectedColor === name ? 'outline:2px solid #fff;outline-offset:2px;' : '';
+    html += `<div onclick="${onchangeFn}('${name}')" title="${name}" style="width:28px;height:28px;border-radius:50%;background:${hex};cursor:pointer;${sel}"></div>`;
+  }
+  html += '</div>';
+  return html;
+}
+
+// ---------------------------------------------------------------------------
+// Lists — shared item-row renderer (used by grid modal AND list-detail view)
+// ---------------------------------------------------------------------------
+function _itemRowHtml(item, listId) {
+  const indent = item.indent_level === 1 ? 'padding-left:28px;' : '';
+  const strikeStyle = item.checked ? 'text-decoration:line-through;opacity:0.5;' : '';
+  return `<div class="list-item-row" data-item-id="${item.id}" style="${indent}">
+    ${!item.checked
+      ? `<span class="drag-handle" title="Drag to reorder">⠿</span>`
+      : '<span style="width:20px;display:inline-block;"></span>'}
+    <input type="checkbox" ${item.checked ? 'checked' : ''}
+      onchange="toggleListItem('${listId}','${item.id}',this.checked)"
+      onclick="event.stopPropagation()"
+      style="flex-shrink:0;width:16px;height:16px;cursor:pointer;">
+    <span id="li-content-${item.id}" class="li-text" style="flex:1;font-size:14px;${strikeStyle}"
+      ondblclick="startEditListItem('${item.id}')">${escHtml(item.content)}</span>
+    <button class="btn btn-sm btn-ghost" onclick="openItemMenu('${listId}','${item.id}')"
+      style="padding:2px 6px;font-size:16px;flex-shrink:0;">⋯</button>
+  </div>`;
+}
+
+// Render a full list (items + add row) into any container element.
+// isModal=true swaps the header close button.
+async function _renderListIntoContainer(containerEl, listId, isModal = false) {
+  try {
+    const lst = await api('GET', `/lists/${listId}`);
+    const items = lst.items || [];
+    const unchecked = items.filter(i => !i.checked);
+    const checked   = items.filter(i => i.checked);
+
+    const uncheckedHtml = unchecked.length
+      ? unchecked.map(i => _itemRowHtml(i, listId)).join('')
+      : '<p style="color:var(--text-muted);font-size:13px;padding:8px 0;">All items checked! Add more below.</p>';
+
+    const checkedSection = checked.length ? `
+      <details style="margin-top:16px;">
+        <summary style="cursor:pointer;font-size:13px;color:var(--text-muted);user-select:none;">
+          ✓ ${checked.length} checked item${checked.length !== 1 ? 's' : ''}
+        </summary>
+        <div style="margin-top:8px;">
+          ${checked.map(i => _itemRowHtml(i, listId)).join('')}
+          <button class="btn btn-sm btn-ghost" style="margin-top:8px;font-size:12px;"
+            onclick="uncheckAllItems('${listId}')">Uncheck all</button>
+        </div>
+      </details>` : '';
+
+    const headerLeft = isModal
+      ? `<button class="btn btn-sm btn-ghost" onclick="closeListModal()">✕ Close</button>`
+      : `<button class="btn btn-sm btn-ghost" onclick="goBack('lists')">← Back</button>`;
+
+    const colorDot = lst.color && LIST_SWATCH_MAP[lst.color]
+      ? `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${LIST_SWATCH_MAP[lst.color]};margin-right:6px;"></span>`
+      : '';
+
+    containerEl.innerHTML = `
+      <div class="page-header">
+        ${headerLeft}
+        <span class="page-title">${colorDot}${escHtml(lst.name)}</span>
+        <button class="btn btn-sm btn-ghost" onclick="closeListModal(true);navigate('list-settings',{id:'${listId}'})"
+          style="margin-left:auto;">⚙</button>
+      </div>
+      <div id="list-items-container">
+        ${uncheckedHtml}
+      </div>
+      ${checkedSection}
+      <div style="display:flex;gap:8px;margin-top:16px;">
+        <input type="text" id="new-list-item-input" placeholder="Add item…" style="flex:1;"
+          onkeydown="if(event.key==='Enter')addListItem('${listId}')">
+        <button class="btn btn-sm btn-primary" onclick="addListItem('${listId}')">Add</button>
+      </div>
+    `;
+    initListItemDrag(document.getElementById('list-items-container'), listId);
+  } catch (e) {
+    containerEl.innerHTML = `<p style="color:var(--danger)">Error: ${e.message}</p>`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Lists grid view
+// ---------------------------------------------------------------------------
+register('lists', async () => {
+  const el = document.getElementById('main-content');
+  el.innerHTML = `<div class="page-header"><span class="page-title">📋 Lists</span></div><div class="spinner"></div>`;
 
   async function render() {
     try {
-      const ideas = await api('GET', '/ideas');
-      const cats = await fetchCategories().catch(() => []);
-      const catMap = Object.fromEntries(cats.map(c => [c.name, c.icon]));
-
-      const sorted = sortListItems(ideas, sort.col, sort.dir, sort.col === 'category' ? 'priority' : 'category');
-
-      const tableHtml = sorted.length ? `
-        <table class="list-table">
-          <thead><tr>
-            <th class="sortable" onclick="setIdeaSort('id')">ID ${sortArrowHtml(sort,'id')}</th>
-            <th class="sortable" onclick="setIdeaSort('name')">Name ${sortArrowHtml(sort,'name')}</th>
-            <th class="sortable" onclick="setIdeaSort('category')">Category ${sortArrowHtml(sort,'category')}</th>
-            <th class="sortable" onclick="setIdeaSort('priority')">Priority ${sortArrowHtml(sort,'priority')}</th>
-          </tr></thead>
-          <tbody>
-            ${sorted.map(i => `<tr>
-              <td class="id-cell">${i.id}</td>
-              <td><a href="#" class="table-link" onclick="navigate('idea-detail',{id:'${i.id}'});return false;">${escHtml(i.name)}</a></td>
-              <td>${i.category ? escHtml((catMap[i.category] || '') + ' ' + i.category) : '<span class="dim">—</span>'}</td>
-              <td>${priorityBadge(i.priority)}</td>
-            </tr>`).join('')}
-          </tbody>
-        </table>
-      ` : '<p style="color:var(--text-muted);font-size:14px;margin-top:16px;">No ideas found.</p>';
+      const lists = await api('GET', '/lists?include_items=true');
+      const grid = lists.length
+        ? `<div id="lists-grid" class="lists-grid">${lists.map(_renderListCard).join('')}</div>`
+        : `<p style="color:var(--text-muted);font-size:14px;margin-top:16px;">No lists yet. Create your first one!</p>`;
 
       el.innerHTML = `
         <div class="page-header">
-          <span class="page-title">💡 Ideas</span>
-          <button class="btn btn-sm btn-primary" onclick="navigate('create-idea')">+ New</button>
+          <span class="page-title">📋 Lists</span>
+          <button class="btn btn-sm btn-ghost" onclick="navigate('search')" style="margin-left:auto;">🔍</button>
+          <button class="btn btn-sm btn-primary" onclick="navigate('create-list')">+ New</button>
         </div>
-        ${tableHtml}
+        ${grid}
       `;
+      if (lists.length) initCardDrag(document.getElementById('lists-grid'));
     } catch (e) {
-      el.innerHTML += `<p style="color:var(--danger)">Error: ${e.message}</p>`;
+      el.innerHTML = `<p style="color:var(--danger)">Error: ${e.message}</p>`;
     }
   }
 
-  window.setIdeaSort = function(col) {
-    if (sort.col === col) sort.dir *= -1; else { sort.col = col; sort.dir = 1; }
-    render();
-  };
-
-  render();
+  window._refreshListsGrid = render;
+  await render();
 });
 
-// ---------------------------------------------------------------------------
-// Idea Detail view
-// ---------------------------------------------------------------------------
-register('idea-detail', async ({ id }) => {
-  const el = document.getElementById('main-content');
-  el.innerHTML = `<div class="spinner"></div>`;
+function _renderListCard(lst) {
+  const colorStyle = _listCardStyle(lst.color);
+  const items = lst.items || [];
+  const unchecked = items.filter(i => !i.checked);
+  const checked   = items.filter(i => i.checked);
+  const MAX = 8;
+  const visible = unchecked.slice(0, MAX);
+  const moreCount = (unchecked.length - visible.length) + checked.length;
 
-  try {
-    const idea = await api('GET', `/ideas/${id}`);
-    const canGraduate = idea.status !== 'Graduated' && idea.status !== 'Archived';
+  const itemsHtml = visible.map(item => `
+    <div class="list-card-item">
+      <input type="checkbox"
+        onchange="toggleFromCard('${lst.id}','${item.id}',this.checked)"
+        onclick="event.stopPropagation()">
+      <span style="${item.indent_level ? 'padding-left:10px;' : ''};color:var(--text);">${escHtml(item.content)}</span>
+    </div>`).join('');
 
-    el.innerHTML = `
-      <div class="page-header">
-        <button class="btn btn-sm btn-ghost" onclick="goBack('ideas')">← Back</button>
-        <button class="btn btn-sm btn-secondary" onclick="navigate('edit-idea', {id:'${idea.id}'})">Edit</button>
-      </div>
+  const emptyHtml = items.length === 0
+    ? `<div style="font-size:12px;color:var(--text-muted);font-style:italic;">Empty list</div>`
+    : '';
 
-      <div class="card">
-        <div class="card-row" style="margin-bottom:8px;">
-          <h2 style="font-size:18px;font-weight:700;">${escHtml(idea.name)}</h2>
-          <div style="display:flex;gap:6px;flex-shrink:0;">${priorityBadge(idea.priority)}${statusBadge(idea.status)}</div>
-        </div>
-        <div class="card-meta">${idea.id}${idea.category ? ' · ' + escHtml(idea.category) : ''} · Created ${idea.created_at ? idea.created_at.slice(0, 10) : '—'}</div>
-        ${idea.graduated_goal_id ? `<div style="margin-top:8px;font-size:13px;color:var(--text-muted);">Graduated → <a href="#" onclick="navigate('goal-detail',{id:'${idea.graduated_goal_id}'})" style="color:var(--primary);">${idea.graduated_goal_id}</a></div>` : ''}
-        ${idea.description ? `<p style="font-size:14px;color:var(--text);margin-top:12px;line-height:1.6;">${escHtml(idea.description)}</p>` : ''}
-      </div>
+  const moreHtml = moreCount > 0
+    ? `<div style="font-size:12px;color:var(--text-muted);margin-top:4px;">+ ${moreCount} more item${moreCount !== 1 ? 's' : ''}</div>`
+    : '';
 
-      <div class="section-header">📝 Progress Notes</div>
-      <div class="card" style="padding:10px 14px;margin-bottom:16px;">
-        <textarea
-          id="idea-notes-${idea.id}"
-          class="notes-textarea"
-          placeholder="Log your thinking here… (auto-saves on blur)"
-          onblur="saveIdeaNotes('${idea.id}')"
-        >${escHtml(idea.progress_notes || '')}</textarea>
-        <div id="idea-notes-status-${idea.id}" style="font-size:11px;color:var(--text-muted);text-align:right;margin-top:4px;min-height:14px;"></div>
-      </div>
+  const reminderHtml = lst.reminder_time
+    ? `<div style="font-size:11px;color:var(--text-muted);margin-top:6px;">⏰ ${lst.reminder_time}${lst.reminder_recurrence ? ' · ' + lst.reminder_recurrence : ''}</div>`
+    : '';
 
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
-        ${canGraduate ? `<button class="btn btn-sm btn-primary" onclick="graduateIdea('${idea.id}')">🎓 Graduate to Goal</button>` : ''}
-        <select onchange="updateIdeaStatus('${idea.id}', this.value)" style="flex:1;min-width:130px;">
-          ${['Incubating', 'Active', 'Graduated', 'Archived'].map(s =>
-            `<option ${s === idea.status ? 'selected' : ''}>${s}</option>`
-          ).join('')}
-        </select>
-      </div>
-    `;
-  } catch (e) {
-    el.innerHTML = `<p style="color:var(--danger)">Error: ${e.message}</p>`;
-  }
-});
+  return `<div class="list-card" data-list-id="${lst.id}" style="${colorStyle}">
+    <div class="list-card-title">${escHtml(lst.name)}</div>
+    ${emptyHtml}${itemsHtml}${moreHtml}${reminderHtml}
+  </div>`;
+}
 
-window.saveIdeaNotes = async function(id) {
-  const ta = document.getElementById('idea-notes-' + id);
-  const statusEl = document.getElementById('idea-notes-status-' + id);
-  if (!ta) return;
-  try {
-    if (statusEl) statusEl.textContent = 'Saving…';
-    await api('PUT', `/ideas/${id}`, { progress_notes: ta.value });
-    if (statusEl) {
-      statusEl.textContent = 'Saved ✓';
-      setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 2000);
+function initCardDrag(gridEl) {
+  if (!gridEl) return;
+  gridEl.addEventListener('pointerdown', e => {
+    const card = e.target.closest('.list-card[data-list-id]');
+    if (!card) return;
+    // Don't intercept interactive children
+    if (e.target.closest('input, button, a, details')) return;
+
+    let moved = false;
+    const startX = e.clientX, startY = e.clientY;
+
+    function onMove(ev) {
+      if (!moved && (Math.abs(ev.clientX - startX) > 6 || Math.abs(ev.clientY - startY) > 6)) {
+        moved = true;
+        card.classList.add('dragging');
+        e.preventDefault();
+      }
+      if (!moved) return;
+      const cards = [...gridEl.querySelectorAll('.list-card')];
+      for (const other of cards) {
+        if (other === card) continue;
+        const r = other.getBoundingClientRect();
+        if (ev.clientX >= r.left && ev.clientX <= r.right &&
+            ev.clientY >= r.top  && ev.clientY <= r.bottom) {
+          const mid = r.top + r.height / 2;
+          gridEl.insertBefore(card, ev.clientY < mid ? other : other.nextSibling);
+          break;
+        }
+      }
     }
-  } catch (e) {
-    if (statusEl) statusEl.textContent = 'Error saving';
-    toast(`Error saving notes: ${e.message}`);
+
+    async function onUp() {
+      document.removeEventListener('pointermove', onMove);
+      card.classList.remove('dragging');
+      if (!moved) {
+        openListModal(card.dataset.listId);
+      } else {
+        const ids = [...gridEl.querySelectorAll('.list-card')].map(c => c.dataset.listId);
+        await api('PUT', '/lists/order', { ids }).catch(() => toast('Failed to save order'));
+      }
+    }
+
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp, { once: true });
+  });
+}
+
+window.openListModal = async function(listId) {
+  document.getElementById('list-modal-overlay')?.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'list-modal-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:300;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;padding:16px;';
+  overlay.innerHTML = `
+    <div id="list-modal-sheet" class="list-modal-sheet">
+      <div id="list-modal-inner" style="overflow-y:auto;flex:1;padding:16px;">
+        <div class="spinner"></div>
+      </div>
+    </div>`;
+
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeListModal(); });
+  document.addEventListener('keydown', _modalEscHandler);
+  document.body.appendChild(overlay);
+
+  async function refreshModal() {
+    const inner = document.getElementById('list-modal-inner');
+    if (inner) await _renderListIntoContainer(inner, listId, true);
   }
+  window._renderCurrentListDetail = refreshModal;
+  await refreshModal();
 };
 
-window.updateIdeaStatus = async function(id, status) {
+function _modalEscHandler(e) {
+  if (e.key === 'Escape') closeListModal();
+}
+
+window.closeListModal = function(skipRefresh = false) {
+  document.getElementById('list-modal-overlay')?.remove();
+  document.removeEventListener('keydown', _modalEscHandler);
+  window._renderCurrentListDetail = null;
+  if (!skipRefresh) window._refreshListsGrid?.();
+};
+
+window.toggleFromCard = async function(listId, itemId, checked) {
   try {
-    await api('PUT', `/ideas/${id}`, { status });
-    toast(`Status → ${status}`);
-    navigate('idea-detail', { id });
+    await api('PUT', `/lists/${listId}/items/${itemId}`, { checked });
+    // If a modal is open for this list, refresh it; otherwise refresh the grid card
+    if (window._renderCurrentListDetail) {
+      await window._renderCurrentListDetail();
+    } else {
+      window._refreshListsGrid?.();
+    }
   } catch (e) { toast(`Error: ${e.message}`); }
 };
 
-window.graduateIdea = async function(id) {
-  if (!confirm('Graduate this idea to a strategic goal?\n\nA new Backlog goal will be created from this idea.')) return;
+// ---------------------------------------------------------------------------
+// List Detail view (standalone — used from search, dashboard, direct nav)
+// ---------------------------------------------------------------------------
+register('list-detail', async ({ id }) => {
+  const el = document.getElementById('main-content');
+  el.innerHTML = `<div class="spinner"></div>`;
+  window._renderCurrentListDetail = () => _renderListIntoContainer(el, id);
+  window._refreshListsGrid = null; // not in grid context
+  await _renderListIntoContainer(el, id);
+});
+
+function initListItemDrag(container, listId) {
+  if (!container) return;
+  container.addEventListener('pointerdown', e => {
+    const handle = e.target.closest('.drag-handle');
+    if (!handle) return;
+    e.preventDefault();
+    const dragEl = handle.closest('.list-item-row');
+    if (!dragEl) return;
+    dragEl.style.opacity = '0.5';
+
+    function onMove(ev) {
+      const rows = [...container.querySelectorAll('.list-item-row')];
+      let insertBefore = null;
+      for (const row of rows) {
+        if (row === dragEl) continue;
+        const r = row.getBoundingClientRect();
+        if (ev.clientY < r.top + r.height / 2) { insertBefore = row; break; }
+      }
+      container.insertBefore(dragEl, insertBefore);
+    }
+
+    async function onUp() {
+      document.removeEventListener('pointermove', onMove);
+      dragEl.style.opacity = '';
+      const orderedIds = [...container.querySelectorAll('.list-item-row')]
+        .map(r => r.dataset.itemId)
+        .filter(Boolean);
+      try {
+        await api('PUT', `/lists/${listId}/items/order`, { ids: orderedIds });
+      } catch { toast('Failed to save order'); }
+    }
+
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp, { once: true });
+  });
+}
+
+window.toggleListItem = async function(listId, itemId, checked) {
   try {
-    const res = await api('POST', `/ideas/${id}/graduate`);
+    await api('PUT', `/lists/${listId}/items/${itemId}`, { checked });
+    if (window._renderCurrentListDetail) await window._renderCurrentListDetail();
+  } catch (e) { toast(`Error: ${e.message}`); }
+};
+
+window.addListItem = async function(listId) {
+  const input = document.getElementById('new-list-item-input');
+  if (!input) return;
+  const content = input.value.trim();
+  if (!content) return;
+  try {
+    await api('POST', `/lists/${listId}/items`, { content });
+    input.value = '';
+    if (window._renderCurrentListDetail) await window._renderCurrentListDetail();
+    requestAnimationFrame(() => { const i = document.getElementById('new-list-item-input'); if (i) i.focus(); });
+  } catch (e) { toast(`Error: ${e.message}`); }
+};
+
+window.uncheckAllItems = async function(listId) {
+  try {
+    await api('POST', `/lists/${listId}/uncheck-all`);
+    if (window._renderCurrentListDetail) await window._renderCurrentListDetail();
+  } catch (e) { toast(`Error: ${e.message}`); }
+};
+
+window.startEditListItem = function(itemId) {
+  const span = document.getElementById('li-content-' + itemId);
+  if (!span) return;
+  const original = span.textContent;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = original;
+  input.style.cssText = 'flex:1;font-size:14px;padding:2px 6px;background:var(--surface2);border:1px solid var(--primary);border-radius:4px;outline:none;color:var(--text);min-width:0;';
+  span.parentNode.replaceChild(input, span);
+  input.focus(); input.select();
+  let committed = false;
+  async function commit() {
+    if (committed) return; committed = true;
+    const newVal = input.value.trim();
+    if (!newVal || newVal === original) { input.parentNode.replaceChild(span, input); return; }
+    // Find list id from parent container
+    const row = input.closest('.list-item-row');
+    const container = input.closest('#list-items-container');
+    try {
+      // We need the list id — stored in the render closure; use data attr on container
+      const listId = document.getElementById('new-list-item-input')?.closest('[data-list-id]')?.dataset?.listId
+        || window._currentParams?.id;
+      await api('PUT', `/lists/${listId}/items/${itemId}`, { content: newVal });
+      span.textContent = newVal;
+    } catch (e) { toast(`Error: ${e.message}`); committed = false; }
+    input.parentNode.replaceChild(span, input);
+  }
+  input.addEventListener('blur', commit);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    if (e.key === 'Escape') { committed = true; input.parentNode.replaceChild(span, input); }
+  });
+};
+
+window.openItemMenu = async function(listId, itemId) {
+  // Close any existing menu
+  document.getElementById('item-menu-overlay')?.remove();
+
+  const item = await api('GET', `/lists/${listId}/items/${itemId}`).catch(() => null);
+  if (!item) return;
+
+  const overlay = document.createElement('div');
+  overlay.id = 'item-menu-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:400;background:rgba(0,0,0,0.4);display:flex;align-items:flex-end;';
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  const indentAction = item.indent_level === 0
+    ? `<button class="btn btn-full" style="margin-bottom:6px;" onclick="changeIndent('${listId}','${itemId}',1)">⇥ Indent</button>`
+    : `<button class="btn btn-full" style="margin-bottom:6px;" onclick="changeIndent('${listId}','${itemId}',0)">⇤ Dedent</button>`;
+
+  overlay.innerHTML = `
+    <div style="background:var(--surface);width:100%;max-width:480px;margin:0 auto;border-radius:12px 12px 0 0;padding:16px;max-height:80vh;overflow-y:auto;">
+      <div style="font-weight:600;font-size:15px;margin-bottom:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(item.content)}</div>
+      ${indentAction}
+      <button class="btn btn-full" style="margin-bottom:6px;" onclick="openItemNote('${listId}','${itemId}')">📝 Note</button>
+      <button class="btn btn-full btn-primary" style="margin-bottom:6px;" onclick="graduateItemToGoal('${listId}','${itemId}')">🎓 Graduate to Goal</button>
+      <button class="btn btn-full" style="margin-bottom:6px;background:var(--danger);color:#fff;border:none;" onclick="deleteListItemConfirm('${listId}','${itemId}')">Delete</button>
+      <button class="btn btn-full btn-ghost" onclick="document.getElementById('item-menu-overlay').remove()">Cancel</button>
+    </div>`;
+  document.body.appendChild(overlay);
+};
+
+window.changeIndent = async function(listId, itemId, level) {
+  document.getElementById('item-menu-overlay')?.remove();
+  try {
+    await api('PUT', `/lists/${listId}/items/${itemId}`, { indent_level: level });
+    if (window._renderCurrentListDetail) await window._renderCurrentListDetail();
+  } catch (e) { toast(`Error: ${e.message}`); }
+};
+
+window.openItemNote = async function(listId, itemId) {
+  document.getElementById('item-menu-overlay')?.remove();
+  const item = await api('GET', `/lists/${listId}/items/${itemId}`).catch(() => null);
+  if (!item) return;
+
+  const overlay = document.createElement('div');
+  overlay.id = 'item-note-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:400;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;padding:16px;';
+  overlay.innerHTML = `
+    <div style="background:var(--surface);width:100%;max-width:480px;border-radius:10px;padding:16px;">
+      <div style="font-weight:600;margin-bottom:8px;">${escHtml(item.content)}</div>
+      <textarea id="item-note-ta" style="width:100%;min-height:120px;resize:vertical;" placeholder="Notes…">${escHtml(item.note || '')}</textarea>
+      <div style="display:flex;gap:8px;margin-top:10px;">
+        <button class="btn btn-primary" style="flex:1;" onclick="saveItemNote('${listId}','${itemId}')">Save</button>
+        <button class="btn btn-ghost" onclick="document.getElementById('item-note-overlay').remove()">Cancel</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+};
+
+window.saveItemNote = async function(listId, itemId) {
+  const ta = document.getElementById('item-note-ta');
+  if (!ta) return;
+  try {
+    await api('PUT', `/lists/${listId}/items/${itemId}`, { note: ta.value });
+    document.getElementById('item-note-overlay')?.remove();
+    toast('Note saved');
+  } catch (e) { toast(`Error: ${e.message}`); }
+};
+
+window.graduateItemToGoal = async function(listId, itemId) {
+  document.getElementById('item-menu-overlay')?.remove();
+  if (!confirm('Graduate this item to a strategic Backlog goal?\n\nThe item will be marked as checked.')) return;
+  try {
+    const res = await api('POST', `/lists/${listId}/items/${itemId}/graduate`);
     toast('Graduated! Navigating to new goal…');
     _navStack.length = 0;
     navigate('goal-detail', { id: res.goal_id });
   } catch (e) { toast(`Error: ${e.message}`); }
 };
 
-// ---------------------------------------------------------------------------
-// Create Idea view
-// ---------------------------------------------------------------------------
-register('create-idea', async () => {
-  const el = document.getElementById('main-content');
-  el.innerHTML = `<div class="page-header"><button class="btn btn-sm btn-ghost" onclick="goBack('ideas')">← Back</button><span class="page-title">New Idea</span></div><div class="spinner"></div>`;
-  const cats = await fetchCategories().catch(() => []);
-  el.innerHTML = `
-    <div class="page-header">
-      <button class="btn btn-sm btn-ghost" onclick="goBack('ideas')">← Back</button>
-      <span class="page-title">New Idea</span>
-    </div>
-    <div class="form-group"><label class="form-label">Name *</label><input type="text" id="i-name" placeholder="What's the idea?"></div>
-    <div class="form-group"><label class="form-label">Description</label><textarea id="i-desc" placeholder="Describe it…"></textarea></div>
-    <div class="form-group"><label class="form-label">Category</label>${categorySelectHtml(cats, '', 'i-category')}</div>
-    <div class="form-group"><label class="form-label">Priority</label>
-      <select id="i-priority">${['Critical', 'High', 'Medium', 'Low'].map(p => `<option ${p === 'Medium' ? 'selected' : ''}>${p}</option>`).join('')}</select>
-    </div>
-    <div class="form-group"><label class="form-label">Status</label>
-      <select id="i-status">${['Incubating', 'Active'].map(s => `<option ${s === 'Incubating' ? 'selected' : ''}>${s}</option>`).join('')}</select>
-    </div>
-    <button class="btn btn-primary btn-full" onclick="submitCreateIdea()">Save Idea</button>
-  `;
-});
-
-window.submitCreateIdea = async function() {
-  const name = document.getElementById('i-name').value.trim();
-  if (!name) { toast('Name is required'); return; }
+window.deleteListItemConfirm = async function(listId, itemId) {
+  document.getElementById('item-menu-overlay')?.remove();
+  if (!confirm('Delete this item? This cannot be undone.')) return;
   try {
-    const idea = await api('POST', '/ideas', {
-      name,
-      description: document.getElementById('i-desc').value,
-      category: document.getElementById('i-category').value,
-      priority: document.getElementById('i-priority').value,
-      status: document.getElementById('i-status').value,
-    });
-    toast('Idea saved!');
-    navigate('idea-detail', { id: idea.id });
+    await api('DELETE', `/lists/${listId}/items/${itemId}`);
+    if (window._renderCurrentListDetail) await window._renderCurrentListDetail();
   } catch (e) { toast(`Error: ${e.message}`); }
 };
 
 // ---------------------------------------------------------------------------
-// Edit Idea view
+// Create List view
 // ---------------------------------------------------------------------------
-register('edit-idea', async ({ id }) => {
+register('create-list', async () => {
   const el = document.getElementById('main-content');
-  el.innerHTML = `<div class="page-header"><button class="btn btn-sm btn-ghost" onclick="goBack()">← Back</button><span class="page-title">Edit Idea</span></div><div class="spinner"></div>`;
+  let selectedColor = '';
+
+  el.innerHTML = `
+    <div class="page-header">
+      <button class="btn btn-sm btn-ghost" onclick="goBack('lists')">← Back</button>
+      <span class="page-title">New List</span>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Name *</label>
+      <input type="text" id="cl-name" placeholder="Groceries, Packing, Ideas…">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Color</label>
+      <div id="cl-swatches"></div>
+    </div>
+    <details style="margin-bottom:16px;">
+      <summary style="cursor:pointer;font-size:14px;color:var(--primary);">✨ Generate with AI</summary>
+      <div style="margin-top:10px;">
+        <input type="text" id="cl-ai-prompt" placeholder="Packing list for camping…" style="margin-bottom:8px;">
+        <button class="btn btn-sm btn-secondary" onclick="previewAiList()">Generate Preview</button>
+        <div id="cl-ai-preview" style="margin-top:10px;"></div>
+      </div>
+    </details>
+    <button class="btn btn-primary btn-full" onclick="submitCreateList()">Create List</button>
+  `;
+
+  function updateSwatches() {
+    document.getElementById('cl-swatches').innerHTML =
+      _colorSwatchesHtml(selectedColor, "window._setClColor");
+  }
+  window._setClColor = function(c) { selectedColor = c; updateSwatches(); };
+  updateSwatches();
+});
+
+window.previewAiList = async function() {
+  const prompt = document.getElementById('cl-ai-prompt')?.value?.trim();
+  if (!prompt) { toast('Enter a prompt first'); return; }
+  const preview = document.getElementById('cl-ai-preview');
+  preview.innerHTML = '<div class="spinner" style="height:40px;"></div>';
+  try {
+    const res = await api('POST', '/lists/generate', { prompt });
+    window._aiGeneratedItems = res.items;
+    const name = document.getElementById('cl-name');
+    if (name && !name.value) name.value = res.list_name || '';
+    preview.innerHTML = `
+      <p style="font-size:13px;color:var(--text-muted);margin-bottom:6px;">${res.items.length} items generated — they will be added when you click "Create List".</p>
+      <ul style="font-size:13px;padding-left:18px;margin:0;">
+        ${res.items.map(i => `<li>${escHtml(i)}</li>`).join('')}
+      </ul>`;
+  } catch (e) { preview.innerHTML = `<p style="color:var(--danger);font-size:13px;">Error: ${e.message}</p>`; }
+};
+
+window.submitCreateList = async function() {
+  const name = document.getElementById('cl-name')?.value?.trim();
+  if (!name) { toast('Name is required'); return; }
+  const color = window._setClColor ? undefined : undefined; // color stored in closure above
+  // Re-read color from swatch selection
+  const selectedSwatch = document.querySelector('#cl-swatches div[style*="outline:2px solid #fff"]');
+  const colorVal = selectedSwatch ? selectedSwatch.title : '';
 
   try {
-    const [idea, cats] = await Promise.all([api('GET', `/ideas/${id}`), fetchCategories().catch(() => [])]);
+    // If AI items are pending, use the create endpoint
+    if (window._aiGeneratedItems?.length) {
+      const res = await api('POST', '/lists/generate', {
+        prompt: document.getElementById('cl-ai-prompt')?.value || name,
+        list_name: name,
+        color: colorVal || undefined,
+        create: true,
+      });
+      window._aiGeneratedItems = null;
+      toast('List created!');
+      _navStack.length = 0;
+      navigate('list-detail', { id: res.id });
+    } else {
+      const lst = await api('POST', '/lists', { name, color: colorVal || undefined });
+      toast('List created!');
+      _navStack.length = 0;
+      navigate('list-detail', { id: lst.id });
+    }
+  } catch (e) { toast(`Error: ${e.message}`); }
+};
+
+// ---------------------------------------------------------------------------
+// List Settings view
+// ---------------------------------------------------------------------------
+register('list-settings', async ({ id }) => {
+  const el = document.getElementById('main-content');
+  el.innerHTML = `<div class="spinner"></div>`;
+
+  try {
+    const lst = await api('GET', `/lists/${id}`);
+    let selectedColor = lst.color || '';
+
     el.innerHTML = `
       <div class="page-header">
         <button class="btn btn-sm btn-ghost" onclick="goBack()">← Back</button>
-        <span class="page-title">Edit Idea</span>
+        <span class="page-title">List Settings</span>
       </div>
-      <div class="form-group"><label class="form-label">Name *</label><input type="text" id="ei-name" value="${escHtml(idea.name || '')}"></div>
-      <div class="form-group"><label class="form-label">Description</label><textarea id="ei-desc">${escHtml(idea.description || '')}</textarea></div>
-      <div class="form-group"><label class="form-label">Progress Notes</label><textarea id="ei-notes" style="min-height:120px;">${escHtml(idea.progress_notes || '')}</textarea></div>
-      <div class="form-group"><label class="form-label">Category</label>${categorySelectHtml(cats, idea.category || '', 'ei-category')}</div>
-      <div class="form-group"><label class="form-label">Priority</label>
-        <select id="ei-priority">${['Critical', 'High', 'Medium', 'Low'].map(p => `<option ${p === idea.priority ? 'selected' : ''}>${p}</option>`).join('')}</select>
+      <div class="form-group">
+        <label class="form-label">Name *</label>
+        <input type="text" id="ls-name" value="${escHtml(lst.name)}">
       </div>
-      <div class="form-group"><label class="form-label">Status</label>
-        <select id="ei-status">${['Incubating', 'Active', 'Graduated', 'Archived'].map(s => `<option ${s === idea.status ? 'selected' : ''}>${s}</option>`).join('')}</select>
+      <div class="form-group">
+        <label class="form-label">Color</label>
+        <div id="ls-swatches"></div>
       </div>
-      <button class="btn btn-primary btn-full" onclick="submitEditIdea('${idea.id}')">Save Changes</button>
-      <button class="btn btn-full" style="margin-top:8px;background:var(--danger);color:#fff;border:none;" onclick="deleteIdea('${idea.id}')">Delete Idea</button>
+      <div class="section-header">⏰ Reminder</div>
+      <div class="form-group">
+        <label class="form-label">Time (HH:MM, 24h)</label>
+        <input type="text" id="ls-reminder-time" placeholder="08:00" value="${escHtml(lst.reminder_time || '')}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Recurrence</label>
+        <select id="ls-recurrence">
+          ${['', 'daily', 'weekly', 'monthly', 'annually'].map(r =>
+            `<option value="${r}" ${r === (lst.reminder_recurrence || '') ? 'selected' : ''}>${r || 'One-time'}</option>`
+          ).join('')}
+        </select>
+      </div>
+      <button class="btn btn-primary btn-full" onclick="submitListSettings('${id}')">Save</button>
+      <button class="btn btn-full" style="margin-top:8px;background:var(--danger);color:#fff;border:none;" onclick="deleteListConfirm('${id}')">Delete List</button>
     `;
+
+    function updateSwatches() {
+      document.getElementById('ls-swatches').innerHTML =
+        _colorSwatchesHtml(selectedColor, "window._setLsColor");
+    }
+    window._setLsColor = function(c) { selectedColor = c; updateSwatches(); };
+    updateSwatches();
   } catch (e) {
-    el.innerHTML += `<p style="color:var(--danger)">Error: ${e.message}</p>`;
+    el.innerHTML = `<p style="color:var(--danger)">Error: ${e.message}</p>`;
   }
 });
 
-window.submitEditIdea = async function(id) {
-  const name = document.getElementById('ei-name').value.trim();
+window.submitListSettings = async function(id) {
+  const name = document.getElementById('ls-name')?.value?.trim();
   if (!name) { toast('Name is required'); return; }
+  const selectedSwatch = document.querySelector('#ls-swatches div[style*="outline:2px solid #fff"]');
+  const colorVal = selectedSwatch ? selectedSwatch.title : '';
+  const reminderTime = document.getElementById('ls-reminder-time')?.value?.trim() || '';
+  const recurrence = document.getElementById('ls-recurrence')?.value || '';
   try {
-    await api('PUT', `/ideas/${id}`, {
+    await api('PUT', `/lists/${id}`, {
       name,
-      description: document.getElementById('ei-desc').value,
-      progress_notes: document.getElementById('ei-notes').value,
-      category: document.getElementById('ei-category').value,
-      priority: document.getElementById('ei-priority').value,
-      status: document.getElementById('ei-status').value,
+      color: colorVal || null,
+      reminder_time: reminderTime || null,
+      reminder_recurrence: recurrence || null,
     });
-    toast('Idea updated!');
-    navigate('idea-detail', { id });
+    toast('Settings saved');
+    navigate('lists');
+    openListModal(id);
   } catch (e) { toast(`Error: ${e.message}`); }
 };
 
-window.deleteIdea = async function(id) {
+window.deleteListConfirm = async function(id) {
+  const lst = await api('GET', `/lists/${id}`).catch(() => null);
+  if (!confirm(`Delete "${lst?.name || id}"?\n\nAll items will be permanently deleted.`)) return;
   try {
-    const idea = await api('GET', `/ideas/${id}`);
-    if (!confirm(`Delete "${idea.name}"?\n\nThis cannot be undone.`)) return;
-    await api('DELETE', `/ideas/${id}?confirmed=true`);
-    toast('Idea deleted');
+    await api('DELETE', `/lists/${id}?confirmed=true`);
+    toast('List deleted');
     _navStack.length = 0;
-    navigate('ideas');
+    navigate('lists');
   } catch (e) { toast(`Error: ${e.message}`); }
+};
+
+// ---------------------------------------------------------------------------
+// Unified Search view
+// ---------------------------------------------------------------------------
+register('search', async () => {
+  const el = document.getElementById('main-content');
+  el.innerHTML = `
+    <div class="page-header">
+      <button class="btn btn-sm btn-ghost" onclick="goBack()">← Back</button>
+      <span class="page-title">🔍 Search</span>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:16px;">
+      <input type="text" id="search-input" placeholder="Search goals, lists, items…" style="flex:1;"
+        oninput="runSearch()" autofocus>
+    </div>
+    <div id="search-results"></div>
+  `;
+  requestAnimationFrame(() => document.getElementById('search-input')?.focus());
+});
+
+let _searchDebounce;
+window.runSearch = function() {
+  clearTimeout(_searchDebounce);
+  _searchDebounce = setTimeout(async () => {
+    const q = document.getElementById('search-input')?.value?.trim();
+    const results = document.getElementById('search-results');
+    if (!results) return;
+    if (!q) { results.innerHTML = ''; return; }
+    results.innerHTML = '<div class="spinner" style="height:40px;"></div>';
+    try {
+      const data = await api('GET', `/search?q=${encodeURIComponent(q)}`);
+      const goals = data.goals || [];
+      const lists = data.lists || [];
+      const items = data.list_items || [];
+
+      let html = '';
+      if (goals.length) {
+        html += `<div class="section-header">🎯 Goals (${goals.length})</div>`;
+        html += goals.map(g => `<div class="card" onclick="navigate('goal-detail',{id:'${g.id}'})" style="cursor:pointer;">
+          <div class="card-row"><span class="card-title">${escHtml(g.name)}</span>${statusBadge(g.status)}</div>
+          <div class="card-meta">${g.id}${g.category ? ' · ' + escHtml(g.category) : ''}</div>
+        </div>`).join('');
+      }
+      if (lists.length) {
+        html += `<div class="section-header">📋 Lists (${lists.length})</div>`;
+        html += lists.map(l => `<div class="card" onclick="navigate('list-detail',{id:'${l.id}'})" style="cursor:pointer;${_listAccentStyle(l.color)}">
+          <div class="card-row"><span class="card-title">${escHtml(l.name)}</span><span style="font-size:12px;color:var(--text-muted);">${l.id}</span></div>
+        </div>`).join('');
+      }
+      if (items.length) {
+        html += `<div class="section-header">✓ List Items (${items.length})</div>`;
+        html += items.map(i => `<div class="card" onclick="navigate('list-detail',{id:'${i.list_id}'})" style="cursor:pointer;${i.checked ? 'opacity:0.6;' : ''}">
+          <div class="card-row">
+            <span style="font-size:14px;${i.checked ? 'text-decoration:line-through;' : ''}">${escHtml(i.content)}</span>
+            <span style="font-size:11px;color:var(--text-muted);">in ${i.list_id}</span>
+          </div>
+        </div>`).join('');
+      }
+      if (!html) html = `<p style="color:var(--text-muted);font-size:14px;">No results for "${escHtml(q)}"</p>`;
+      results.innerHTML = html;
+    } catch (e) {
+      results.innerHTML = `<p style="color:var(--danger)">Error: ${e.message}</p>`;
+    }
+  }, 300);
 };
 
 // ---------------------------------------------------------------------------
@@ -1096,7 +1570,10 @@ register('goals', async () => {
   const el = document.getElementById('main-content');
   el.innerHTML = `<div class="page-header"><span class="page-title">🎯 Strategic Goals</span></div><div class="spinner"></div>`;
 
-  let sort = { col: 'category', dir: 1 };
+  const _sortKey = 'gf_goals_sort';
+  let sort;
+  try { sort = JSON.parse(localStorage.getItem(_sortKey)) || { col: 'category', dir: 1 }; }
+  catch { sort = { col: 'category', dir: 1 }; }
 
   async function render() {
     try {
@@ -1142,6 +1619,7 @@ register('goals', async () => {
 
   window.setGoalSort = function(col) {
     if (sort.col === col) sort.dir *= -1; else { sort.col = col; sort.dir = 1; }
+    localStorage.setItem(_sortKey, JSON.stringify(sort));
     render();
   };
 
@@ -1207,7 +1685,7 @@ register('goal-detail', async ({ id }) => {
           ? `<button class="btn btn-sm btn-ghost" onclick="promoteGoal('${goal.id}')">⬆ Promote</button>`
           : `<button class="btn btn-sm btn-ghost" onclick="demoteGoal('${goal.id}')">⬇ Demote</button>`
         }
-        <button class="btn btn-sm btn-ghost" onclick="demoteGoalToIdea('${goal.id}')">💡 Demote to Idea</button>
+        <button class="btn btn-sm btn-ghost" onclick="demoteGoalToList('${goal.id}')">📋 Demote to List</button>
         <select onchange="updateStatus('${goal.id}',this.value)" style="flex:1;min-width:120px;">
           ${['Draft','Backlog','Active','Blocked','Completed'].map(s =>
             `<option ${s===goal.status?'selected':''}>${s}</option>`
@@ -1292,14 +1770,14 @@ window.demoteGoal = async function(id) {
   } catch (e) { toast(`Error: ${e.message}`); }
 };
 
-window.demoteGoalToIdea = async function(id) {
+window.demoteGoalToList = async function(id) {
   try {
     const goal = await api('GET', `/goals/${id}`);
-    if (!confirm(`Demote "${goal.name}" to an Idea?\n\nThe goal will be deleted and an idea will be created from it.`)) return;
-    const res = await api('POST', `/goals/${id}/demote-to-idea`);
-    toast('Demoted to Idea!');
+    if (!confirm(`Demote "${goal.name}" to a list item?\n\nThe goal will be deleted and added to your Ideas list.`)) return;
+    const res = await api('POST', `/goals/${id}/demote-to-list`);
+    toast('Demoted to list item!');
     _navStack.length = 0;
-    navigate('idea-detail', { id: res.idea_id });
+    navigate('list-detail', { id: res.item.list_id });
   } catch (e) { toast(`Error: ${e.message}`); }
 };
 
@@ -2040,13 +2518,13 @@ register('tv', async () => {
 
   async function refreshTV() {
     try {
-      const [goals, dailyData, topIdeas] = await Promise.all([
+      const [goals, dailyData, recentListsTv] = await Promise.all([
         api('GET', '/goals'),
         api('GET', '/daily?days=1'),
-        api('GET', '/ideas/top?n=5'),
+        api('GET', '/lists/recent?n=6'),
       ]);
       window._tvLastRefresh = Date.now();
-      mc.innerHTML = buildTvHTML(goals, dailyData, topIdeas);
+      mc.innerHTML = buildTvHTML(goals, dailyData, recentListsTv);
     } catch (e) {
       mc.innerHTML = `
         <div class="tv-shell">
@@ -2077,7 +2555,7 @@ register('tv', async () => {
   window._tvInterval = setInterval(refreshTV, 60000);
 });
 
-function buildTvHTML(goals, dailyData, topIdeas = []) {
+function buildTvHTML(goals, dailyData, recentListsTv = []) {
   const today = localDateStr();
   const in7 = localDateStr(7);
 
@@ -2125,7 +2603,7 @@ function buildTvHTML(goals, dailyData, topIdeas = []) {
         ${buildTvTodayCol(dailyItems, doneCount, totalCount, pct)}
         ${buildTvGoalsCol(goals)}
         ${buildTvUpcomingCol(dueThisWeek, overdue, today)}
-        ${buildTvIdeasCol(topIdeas)}
+        ${buildTvListsCol(recentListsTv)}
       </main>
       <footer class="tv-footer">
         <span>Updated ${new Date().toLocaleTimeString()}</span>
@@ -2262,25 +2740,23 @@ function buildTvUpcomingCol(dueThisWeek, overdue, today) {
     </section>`;
 }
 
-function buildTvIdeasCol(ideas) {
-  const PRIORITY_COLORS = { Critical: '#fca5a5', High: '#fdba74', Medium: '#60a5fa', Low: '#94a3b8' };
-
-  const listHtml = ideas.length
-    ? ideas.map(idea => {
-        const color = PRIORITY_COLORS[idea.priority] || '#94a3b8';
-        return `<div class="tv-due-item">
-          <div style="display:flex;align-items:baseline;gap:8px;">
-            <span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:${color};flex-shrink:0;">${idea.priority}</span>
-            <div class="tv-due-name" style="font-size:15px;">${escHtml(idea.name)}</div>
-          </div>
-          ${idea.status !== 'Incubating' ? `<div class="tv-due-meta" style="color:var(--text-muted);">${idea.status}</div>` : ''}
+function buildTvListsCol(lists) {
+  const listHtml = (lists || []).length
+    ? lists.map(lst => {
+        const remaining = lst.total_items - lst.checked_items;
+        const accent = lst.color && LIST_SWATCH_MAP[lst.color]
+          ? `border-left:3px solid ${LIST_SWATCH_MAP[lst.color]};padding-left:8px;`
+          : '';
+        return `<div class="tv-due-item" style="${accent}">
+          <div class="tv-due-name" style="font-size:15px;">${escHtml(lst.name)}</div>
+          <div class="tv-due-meta" style="color:var(--text-muted);">${remaining} of ${lst.total_items} remaining</div>
         </div>`;
       }).join('')
-    : '<div style="color:var(--text-muted);font-style:italic;font-size:14px;">No active ideas</div>';
+    : '<div style="color:var(--text-muted);font-style:italic;font-size:14px;">No lists</div>';
 
   return `
     <section class="tv-col">
-      <div class="tv-col-header">💡 TOP IDEAS</div>
+      <div class="tv-col-header">📋 LISTS</div>
       ${listHtml}
     </section>`;
 }

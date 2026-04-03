@@ -184,133 +184,114 @@ def delete_goal(goal_id: str, confirmed: bool = False) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# IDEA OPERATIONS
+# LIST OPERATIONS (for LLM tool calling)
 # ---------------------------------------------------------------------------
 
-VALID_IDEA_STATUSES = {"Incubating", "Active", "Graduated", "Archived"}
-VALID_IDEA_PRIORITIES = {"Critical", "High", "Medium", "Low"}
+def list_lists_tool() -> list[dict]:
+    """Return all lists with item counts."""
+    return database.get_lists()
 
 
-def list_ideas(status: Optional[str] = None, priority: Optional[str] = None) -> list[dict]:
-    """List ideas with optional status or priority filters."""
-    return database.get_ideas(status=status, priority=priority)
+def read_list(list_id: str) -> dict:
+    """Read a list and all its items by list ID."""
+    lst = database.get_list(list_id)
+    if not lst:
+        raise ValueError(f"List {list_id} not found")
+    lst["items"] = database.get_list_items(list_id)
+    return lst
 
 
-def read_idea(id_or_name: str) -> dict:
-    """Read an idea by ID or partial name match."""
-    idea = database.get_idea(id_or_name)
-    if not idea:
-        all_ideas = database.get_ideas()
-        matches = [i for i in all_ideas if id_or_name.lower() in i.get("name", "").lower()]
-        if not matches:
-            raise ValueError(f"No idea found matching '{id_or_name}'")
-        if len(matches) > 1:
-            names = ", ".join(f"{i['id']}: {i['name']}" for i in matches[:5])
-            raise ValueError(f"Multiple ideas match '{id_or_name}': {names}")
-        idea = matches[0]
-    return idea
-
-
-def create_idea(
-    name: str,
-    description: str = "",
-    priority: str = "Medium",
-    status: str = "Incubating",
-    category: str = "",
-) -> dict:
-    """Create a new idea record."""
-    if priority not in VALID_IDEA_PRIORITIES:
-        raise ValueError(f"priority must be one of {sorted(VALID_IDEA_PRIORITIES)}")
-    if status not in VALID_IDEA_STATUSES:
-        raise ValueError(f"status must be one of {sorted(VALID_IDEA_STATUSES)}")
+def create_list_item_tool(list_id: str, content: str, note: str = "") -> dict:
+    """Add an item to an existing list."""
+    lst = database.get_list(list_id)
+    if not lst:
+        raise ValueError(f"List {list_id} not found")
     db = database.get_db()
     new_id = id_generator.next_id(db)
-    database.upsert_idea({
-        "id": new_id,
-        "name": name,
-        "description": description,
-        "status": status,
-        "priority": priority,
-        "category": category,
-    })
-    logger.info("Created idea %s: %s", new_id, name)
-    return database.get_idea(new_id)
+    return database.create_list_item(new_id, list_id, content, note=note)
 
 
-def update_idea_field(idea_id: str, field: str, value: str) -> dict:
-    """Update a single field on an idea (name, description, progress_notes, status, priority, category)."""
-    allowed = {"name", "description", "progress_notes", "status", "priority", "category"}
-    if field not in allowed:
-        raise ValueError(f"Field '{field}' is not updatable. Allowed: {sorted(allowed)}")
-    if field == "status" and value not in VALID_IDEA_STATUSES:
-        raise ValueError(f"status must be one of {sorted(VALID_IDEA_STATUSES)}")
-    if field == "priority" and value not in VALID_IDEA_PRIORITIES:
-        raise ValueError(f"priority must be one of {sorted(VALID_IDEA_PRIORITIES)}")
-    idea = database.get_idea(idea_id)
-    if not idea:
-        raise ValueError(f"Idea {idea_id} not found")
-    database.upsert_idea({**idea, field: value})
-    logger.info("Updated idea %s.%s = %r", idea_id, field, value)
-    return database.get_idea(idea_id)
+def update_list_item_tool(item_id: str, content: Optional[str] = None,
+                          checked: Optional[bool] = None, note: Optional[str] = None) -> dict:
+    """Update a list item's content, checked state, or note."""
+    item = database.get_list_item(item_id)
+    if not item:
+        raise ValueError(f"List item {item_id} not found")
+    updates = {}
+    if content is not None:
+        updates["content"] = content
+    if checked is not None:
+        updates["checked"] = 1 if checked else 0
+    if note is not None:
+        updates["note"] = note
+    return database.update_list_item(item_id, **updates)
 
 
-def graduate_idea(idea_id: str, confirmed: bool = False) -> dict:
+def graduate_list_item(item_id: str, confirmed: bool = False) -> dict:
     """
-    Graduate an idea to a strategic goal (Backlog status).
+    Graduate a list item to a strategic goal (Backlog status).
     confirmed must be True — ask the user before setting this.
     """
     if not confirmed:
         raise ValueError("Graduate requires confirmed=True. Ask the user to confirm first.")
-    idea = database.get_idea(idea_id)
-    if not idea:
-        raise ValueError(f"Idea {idea_id} not found")
-    new_goal_id = id_generator.next_id(database.get_db())
+    item = database.get_list_item(item_id)
+    if not item:
+        raise ValueError(f"List item {item_id} not found")
+    db = database.get_db()
+    new_goal_id = id_generator.next_id(db)
     database.upsert_goal({
         "id": new_goal_id,
-        "name": idea["name"],
-        "description": idea.get("description") or "",
-        "progress_notes": idea.get("progress_notes") or "",
+        "name": item["content"],
+        "description": item.get("note") or "",
         "status": "Backlog",
         "horizon": "Yearly",
         "is_milestone": False,
         "notify_before_days": 3,
     })
-    database.upsert_idea({**idea, "status": "Graduated", "graduated_goal_id": new_goal_id})
-    logger.info("Idea %s graduated to goal %s via chat", idea_id, new_goal_id)
-    return {"idea_id": idea_id, "goal_id": new_goal_id, "goal": database.get_goal(new_goal_id)}
+    existing_note = item.get("note") or ""
+    new_note = (existing_note + f"\n\nGraduated Goal: {new_goal_id}").strip()
+    database.update_list_item(item_id, checked=1, note=new_note)
+    logger.info("List item %s graduated to goal %s via chat", item_id, new_goal_id)
+    return {"item_id": item_id, "goal_id": new_goal_id, "goal": database.get_goal(new_goal_id)}
 
 
-def delete_idea(idea_id: str, confirmed: bool = False) -> dict:
-    """Delete an idea. confirmed must be True — ask the user before setting this."""
-    if not confirmed:
-        raise ValueError("Delete requires confirmed=True. Ask the user to confirm first.")
-    idea = database.get_idea(idea_id)
-    if not idea:
-        raise ValueError(f"Idea {idea_id} not found")
-    database.delete_idea(idea_id)
-    logger.info("Deleted idea %s via chat", idea_id)
-    return {"deleted": idea_id, "name": idea.get("name")}
-
-
-def demote_goal_to_idea(goal_id: str) -> dict:
+def demote_goal_to_list(goal_id: str, list_id: Optional[str] = None) -> dict:
     """
-    Convert a strategic goal to an idea, then delete the goal.
-    Copies name, description, progress_notes, and category to the new idea.
+    Convert a strategic goal to a list item, then delete the goal.
+    If list_id is None, adds to a list named 'Ideas' (creating it if needed).
     """
     goal = database.get_goal(goal_id)
     if not goal:
         raise ValueError(f"Goal {goal_id} not found")
 
-    new_id = id_generator.next_id(database.get_db())
-    database.upsert_idea({
-        "id": new_id,
-        "name": goal["name"],
-        "description": goal.get("description") or "",
-        "progress_notes": goal.get("progress_notes") or "",
-        "category": goal.get("category") or "",
-        "status": "Incubating",
-        "priority": "Medium",
-    })
+    # Resolve target list
+    if list_id:
+        lst = database.get_list(list_id)
+        if not lst:
+            raise ValueError(f"List {list_id} not found")
+    else:
+        # Find or create an "Ideas" list
+        all_lists = database.get_lists()
+        ideas_list = next((l for l in all_lists if l["name"].lower() == "ideas"), None)
+        if ideas_list:
+            list_id = ideas_list["id"]
+        else:
+            db = database.get_db()
+            list_id = id_generator.next_id(db)
+            database.create_list(list_id, "Ideas")
+
+    db = database.get_db()
+    new_item_id = id_generator.next_id(db)
+    note_parts = []
+    if goal.get("description"):
+        note_parts.append(f"Description:\n{goal['description']}")
+    if goal.get("progress_notes"):
+        note_parts.append(f"Progress Notes:\n{goal['progress_notes']}")
+    if goal.get("status"):
+        note_parts.append(f"Was Goal Status: {goal['status']}")
+    note = "\n\n".join(note_parts)
+
+    database.create_list_item(new_item_id, list_id, goal["name"], note=note)
     database.delete_goal(goal_id)
-    logger.info("Goal %s demoted to idea %s", goal_id, new_id)
-    return {"goal_id": goal_id, "idea_id": new_id, "idea": database.get_idea(new_id)}
+    logger.info("Goal %s demoted to list item %s in list %s", goal_id, new_item_id, list_id)
+    return {"goal_id": goal_id, "item_id": new_item_id, "item": database.get_list_item(new_item_id)}

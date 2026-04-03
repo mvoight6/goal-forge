@@ -30,6 +30,7 @@ _last_run: dict[str, Optional[datetime]] = {
     "inbox_review": None,
     "beginning_of_month": None,
     "end_of_month": None,
+    "check_list_reminders": None,
 }
 
 
@@ -89,6 +90,30 @@ def _job_end_of_month():
     notifier.send_end_of_month()
 
 
+def _job_check_list_reminders():
+    _record_run("check_list_reminders")
+    try:
+        from goalforge import database, notifier
+        from goalforge.lists_api import _advance_reminder
+        due = database.get_lists_with_due_reminders()
+        for lst in due:
+            title = f"⏰ Reminder: {lst['name']}"
+            counts = database.get_db().execute(
+                "SELECT COUNT(*), SUM(CASE WHEN checked=0 THEN 1 ELSE 0 END) FROM list_items WHERE list_id = ?",
+                [lst["id"]],
+            ).fetchone()
+            total = counts[0] or 0
+            remaining = counts[1] or 0
+            body = f"{remaining} of {total} items remaining" if total else "Open the list to view items."
+            notifier.send_push(title, body, priority="default", tags=["clipboard"])
+            # Advance or clear the reminder
+            next_at = _advance_reminder(lst)
+            database.update_list(lst["id"], reminder_next_at=next_at)
+            logger.info("List reminder fired for '%s', next_at=%s", lst["name"], next_at)
+    except Exception as e:
+        logger.error("check_list_reminders failed: %s", e, exc_info=True)
+
+
 JOB_MAP = {
     "check_due_dates": _job_check_due_dates,
     "daily_morning_briefing": _job_daily_morning_briefing,
@@ -97,6 +122,7 @@ JOB_MAP = {
     "inbox_review": _job_inbox_review,
     "beginning_of_month": _job_beginning_of_month,
     "end_of_month": _job_end_of_month,
+    "check_list_reminders": _job_check_list_reminders,
 }
 
 
@@ -130,6 +156,9 @@ def start_scheduler():
     # End of month — last day
     eomh, eomm = _parse_time(config.notifications.end_of_month.time or "17:00")
     _scheduler.add_job(_job_end_of_month, CronTrigger(day="last", hour=eomh, minute=eomm), id="end_of_month", replace_existing=True)
+
+    # List reminders — check every 30 minutes
+    _scheduler.add_job(_job_check_list_reminders, CronTrigger(minute="0,30"), id="check_list_reminders", replace_existing=True)
 
     _scheduler.start()
     logger.info("Scheduler started with %d jobs", len(_scheduler.get_jobs()))

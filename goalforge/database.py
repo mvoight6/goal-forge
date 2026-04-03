@@ -3,6 +3,7 @@ SQLite layer — schema creation and all query helpers.
 Uses sqlite_utils for convenience while exposing typed helper functions.
 """
 import logging
+import re
 import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -168,8 +169,56 @@ def _ensure_schema(db: sqlite_utils.Database):
         )
     """)
 
+    # Lists & list items (Google Keep-style)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS lists (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            color TEXT DEFAULT NULL,
+            sort_order INTEGER DEFAULT 0,
+            reminder_time TEXT DEFAULT NULL,
+            reminder_recurrence TEXT DEFAULT NULL,
+            reminder_next_at TIMESTAMP DEFAULT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS list_items (
+            id TEXT PRIMARY KEY,
+            list_id TEXT NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
+            content TEXT NOT NULL DEFAULT '',
+            checked INTEGER DEFAULT 0,
+            sort_order REAL DEFAULT 0,
+            indent_level INTEGER DEFAULT 0,
+            note TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    db.execute("DROP TRIGGER IF EXISTS lists_updated")
+    db.execute("""
+        CREATE TRIGGER lists_updated
+        AFTER UPDATE OF name, color, sort_order, reminder_time, reminder_recurrence, reminder_next_at
+        ON lists
+        BEGIN
+            UPDATE lists SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+        END
+    """)
+    db.execute("DROP TRIGGER IF EXISTS list_items_updated")
+    db.execute("""
+        CREATE TRIGGER list_items_updated
+        AFTER UPDATE OF content, checked, sort_order, indent_level, note
+        ON list_items
+        BEGIN
+            UPDATE list_items SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+            UPDATE lists SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.list_id;
+        END
+    """)
+
     db.conn.commit()
     logger.debug("Schema ensured.")
+    _migrate_ideas_to_lists(db)
 
 
 def _compute_depth(db: sqlite_utils.Database, parent_goal_id: Optional[str]) -> int:
@@ -691,7 +740,6 @@ def update_category(cat_id: int, name: Optional[str], icon: Optional[str]):
         old = db.execute("SELECT name FROM categories WHERE id = ?", [cat_id]).fetchone()
         if old and old[0] != name:
             db.execute("UPDATE goals SET category = ? WHERE category = ?", [name, old[0]])
-            db.execute("UPDATE ideas SET category = ? WHERE category = ?", [name, old[0]])
         db.execute("UPDATE categories SET name = ? WHERE id = ?", [name, cat_id])
     if icon is not None:
         db.execute("UPDATE categories SET icon = ? WHERE id = ?", [icon, cat_id])
@@ -703,7 +751,6 @@ def delete_category(cat_id: int):
     row = db.execute("SELECT name FROM categories WHERE id = ?", [cat_id]).fetchone()
     if row:
         db.execute("UPDATE goals SET category = NULL WHERE category = ?", [row[0]])
-        db.execute("UPDATE ideas SET category = '' WHERE category = ?", [row[0]])
     db.execute("DELETE FROM categories WHERE id = ?", [cat_id])
     db.conn.commit()
 
@@ -713,3 +760,350 @@ def set_category_order(ids: list):
     for i, cat_id in enumerate(ids):
         db.execute("UPDATE categories SET sort_order = ? WHERE id = ?", [i, cat_id])
     db.conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Ideas → Lists migration (idempotent, runs once at startup)
+# ---------------------------------------------------------------------------
+
+def _format_idea_note(idea: dict) -> str:
+    """Serialize all idea metadata into a human-readable note string."""
+    parts = []
+    if idea.get("description"):
+        parts.append(f"Description:\n{idea['description']}")
+    meta = []
+    if idea.get("status"):
+        meta.append(f"Status: {idea['status']}")
+    if idea.get("priority"):
+        meta.append(f"Priority: {idea['priority']}")
+    if idea.get("category"):
+        meta.append(f"Category: {idea['category']}")
+    if meta:
+        parts.append(" | ".join(meta))
+    if idea.get("progress_notes"):
+        parts.append(f"Progress Notes:\n{idea['progress_notes']}")
+    if idea.get("graduated_goal_id"):
+        parts.append(f"Graduated Goal: {idea['graduated_goal_id']}")
+    return "\n\n".join(parts)
+
+
+def _migrate_ideas_to_lists(db: sqlite_utils.Database):
+    """Migrate existing ideas rows into the lists/list_items tables (one-time, idempotent)."""
+    try:
+        list_count = db.execute("SELECT COUNT(*) FROM lists").fetchone()[0]
+        if list_count > 0:
+            return  # Already migrated
+
+        idea_rows = db.execute("SELECT * FROM ideas").fetchall()
+        if not idea_rows:
+            return  # Nothing to migrate
+
+        idea_cols = [d[0] for d in db.execute("SELECT * FROM ideas LIMIT 0").description]
+        ideas = [dict(zip(idea_cols, row)) for row in idea_rows]
+
+        # Compute starting ID counter across all existing GF-XXXX rows
+        all_ids: list[str] = []
+        for tbl in ("goals", "ideas", "lists", "list_items"):
+            try:
+                all_ids.extend(r[0] for r in db.execute(f"SELECT id FROM {tbl}").fetchall())
+            except Exception:
+                pass
+        max_num = 0
+        for rid in all_ids:
+            m = re.match(r"GF-(\d+)$", str(rid))
+            if m:
+                max_num = max(max_num, int(m.group(1)))
+        counter = [max_num]
+
+        def _next_id() -> str:
+            counter[0] += 1
+            return f"GF-{counter[0]:04d}"
+
+        # Split ideas: archived/graduated → "Archived Ideas" list; others grouped by category
+        archived = [i for i in ideas if i.get("status") in ("Graduated", "Archived")]
+        active = [i for i in ideas if i.get("status") not in ("Graduated", "Archived")]
+
+        # Group active ideas by category; uncategorised → "Ideas"
+        from collections import defaultdict
+        by_cat: dict[str, list] = defaultdict(list)
+        for idea in active:
+            cat = (idea.get("category") or "").strip() or "Ideas"
+            by_cat[cat].append(idea)
+
+        def _insert_list(name: str, ideas_subset: list, checked: int = 0):
+            list_id = _next_id()
+            db.conn.execute(
+                "INSERT INTO lists (id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                [list_id, name],
+            )
+            for idx, idea in enumerate(ideas_subset):
+                item_id = _next_id()
+                note = _format_idea_note(idea)
+                db.conn.execute(
+                    """INSERT INTO list_items
+                       (id, list_id, content, checked, sort_order, note, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))""",
+                    [item_id, list_id, idea["name"], checked, float(idx), note,
+                     idea.get("created_at"), idea.get("updated_at")],
+                )
+
+        for cat_name, cat_ideas in sorted(by_cat.items()):
+            _insert_list(cat_name, cat_ideas, checked=0)
+
+        if archived:
+            _insert_list("Archived Ideas", archived, checked=1)
+
+        db.conn.commit()
+        logger.info(
+            "Migrated %d ideas → %d list(s)",
+            len(ideas),
+            len(by_cat) + (1 if archived else 0),
+        )
+    except Exception as e:
+        logger.error("Ideas→Lists migration failed: %s", e, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Lists helpers
+# ---------------------------------------------------------------------------
+
+_LIST_COLS = ["id", "name", "color", "sort_order", "reminder_time",
+              "reminder_recurrence", "reminder_next_at", "created_at", "updated_at"]
+
+
+def _row_to_list(row) -> dict:
+    return dict(zip(_LIST_COLS, row))
+
+
+def get_lists() -> list[dict]:
+    """All lists ordered by sort_order, each augmented with item counts."""
+    db = get_db()
+    rows = db.execute(
+        f"SELECT {', '.join(_LIST_COLS)} FROM lists ORDER BY sort_order ASC, created_at ASC"
+    ).fetchall()
+    result = []
+    for row in rows:
+        lst = _row_to_list(row)
+        counts = db.execute(
+            "SELECT COUNT(*), SUM(checked) FROM list_items WHERE list_id = ?",
+            [lst["id"]],
+        ).fetchone()
+        lst["total_items"] = counts[0] or 0
+        lst["checked_items"] = counts[1] or 0
+        result.append(lst)
+    return result
+
+
+def get_recent_lists(n: int = 5) -> list[dict]:
+    """Most recently updated lists (for dashboard widget)."""
+    db = get_db()
+    rows = db.execute(
+        f"SELECT {', '.join(_LIST_COLS)} FROM lists ORDER BY updated_at DESC LIMIT ?", [n]
+    ).fetchall()
+    result = []
+    for row in rows:
+        lst = _row_to_list(row)
+        counts = db.execute(
+            "SELECT COUNT(*), SUM(checked) FROM list_items WHERE list_id = ?",
+            [lst["id"]],
+        ).fetchone()
+        lst["total_items"] = counts[0] or 0
+        lst["checked_items"] = counts[1] or 0
+        # Grab first 3 unchecked items for preview
+        preview_rows = db.execute(
+            "SELECT content FROM list_items WHERE list_id = ? AND checked = 0 ORDER BY sort_order ASC LIMIT 3",
+            [lst["id"]],
+        ).fetchall()
+        lst["preview_items"] = [r[0] for r in preview_rows]
+        result.append(lst)
+    return result
+
+
+def get_list(list_id: str) -> Optional[dict]:
+    db = get_db()
+    row = db.execute(
+        f"SELECT {', '.join(_LIST_COLS)} FROM lists WHERE id = ?", [list_id]
+    ).fetchone()
+    if not row:
+        return None
+    lst = _row_to_list(row)
+    counts = db.execute(
+        "SELECT COUNT(*), SUM(checked) FROM list_items WHERE list_id = ?", [list_id]
+    ).fetchone()
+    lst["total_items"] = counts[0] or 0
+    lst["checked_items"] = counts[1] or 0
+    return lst
+
+
+def create_list(list_id: str, name: str, color: Optional[str] = None) -> dict:
+    db = get_db()
+    max_order = db.execute("SELECT COALESCE(MAX(sort_order), -1) FROM lists").fetchone()[0]
+    db.conn.execute(
+        "INSERT INTO lists (id, name, color, sort_order) VALUES (?, ?, ?, ?)",
+        [list_id, name, color, max_order + 1],
+    )
+    db.conn.commit()
+    return get_list(list_id)
+
+
+def update_list(list_id: str, **kwargs) -> Optional[dict]:
+    """Update any subset of list fields. Returns updated list or None."""
+    db = get_db()
+    allowed = {"name", "color", "sort_order", "reminder_time", "reminder_recurrence", "reminder_next_at"}
+    updates = {k: v for k, v in kwargs.items() if k in allowed}
+    if not updates:
+        return get_list(list_id)
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    db.conn.execute(
+        f"UPDATE lists SET {set_clause} WHERE id = ?",
+        list(updates.values()) + [list_id],
+    )
+    db.conn.commit()
+    return get_list(list_id)
+
+
+def delete_list(list_id: str):
+    db = get_db()
+    db.conn.execute("DELETE FROM list_items WHERE list_id = ?", [list_id])
+    db.conn.execute("DELETE FROM lists WHERE id = ?", [list_id])
+    db.conn.commit()
+
+
+def set_list_order(ids: list[str]):
+    db = get_db()
+    for i, lid in enumerate(ids):
+        db.conn.execute("UPDATE lists SET sort_order = ? WHERE id = ?", [i, lid])
+    db.conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# List items helpers
+# ---------------------------------------------------------------------------
+
+_ITEM_COLS = ["id", "list_id", "content", "checked", "sort_order",
+              "indent_level", "note", "created_at", "updated_at"]
+
+
+def _row_to_item(row) -> dict:
+    d = dict(zip(_ITEM_COLS, row))
+    d["checked"] = bool(d["checked"])
+    return d
+
+
+def get_list_items(list_id: str) -> list[dict]:
+    """Items for a list: unchecked first (by sort_order), then checked."""
+    db = get_db()
+    rows = db.execute(
+        f"SELECT {', '.join(_ITEM_COLS)} FROM list_items WHERE list_id = ? ORDER BY checked ASC, sort_order ASC",
+        [list_id],
+    ).fetchall()
+    return [_row_to_item(r) for r in rows]
+
+
+def get_list_item(item_id: str) -> Optional[dict]:
+    db = get_db()
+    row = db.execute(
+        f"SELECT {', '.join(_ITEM_COLS)} FROM list_items WHERE id = ?", [item_id]
+    ).fetchone()
+    return _row_to_item(row) if row else None
+
+
+def create_list_item(item_id: str, list_id: str, content: str,
+                     note: str = "", indent_level: int = 0) -> dict:
+    db = get_db()
+    # Place at end of unchecked items
+    max_order = db.execute(
+        "SELECT COALESCE(MAX(sort_order), -1) FROM list_items WHERE list_id = ? AND checked = 0",
+        [list_id],
+    ).fetchone()[0]
+    db.conn.execute(
+        "INSERT INTO list_items (id, list_id, content, note, indent_level, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+        [item_id, list_id, content, note, indent_level, max_order + 1.0],
+    )
+    # Bump list updated_at manually (trigger only fires on UPDATE)
+    db.conn.execute("UPDATE lists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [list_id])
+    db.conn.commit()
+    return get_list_item(item_id)
+
+
+def update_list_item(item_id: str, **kwargs) -> Optional[dict]:
+    db = get_db()
+    allowed = {"content", "checked", "sort_order", "indent_level", "note"}
+    updates = {k: v for k, v in kwargs.items() if k in allowed}
+    if not updates:
+        return get_list_item(item_id)
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    db.conn.execute(
+        f"UPDATE list_items SET {set_clause} WHERE id = ?",
+        list(updates.values()) + [item_id],
+    )
+    db.conn.commit()
+    return get_list_item(item_id)
+
+
+def delete_list_item(item_id: str):
+    db = get_db()
+    item = get_list_item(item_id)
+    db.conn.execute("DELETE FROM list_items WHERE id = ?", [item_id])
+    if item:
+        db.conn.execute("UPDATE lists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [item["list_id"]])
+    db.conn.commit()
+
+
+def reorder_list_items(list_id: str, ordered_ids: list[str]):
+    """Assign new sort_order values based on the provided ordered list of item IDs."""
+    db = get_db()
+    for idx, item_id in enumerate(ordered_ids):
+        db.conn.execute(
+            "UPDATE list_items SET sort_order = ? WHERE id = ? AND list_id = ?",
+            [float(idx), item_id, list_id],
+        )
+    db.conn.execute("UPDATE lists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [list_id])
+    db.conn.commit()
+
+
+def uncheck_all_list_items(list_id: str):
+    db = get_db()
+    db.conn.execute("UPDATE list_items SET checked = 0 WHERE list_id = ?", [list_id])
+    db.conn.execute("UPDATE lists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [list_id])
+    db.conn.commit()
+
+
+def get_lists_with_due_reminders() -> list[dict]:
+    """Lists whose reminder_next_at is in the past (due to fire)."""
+    db = get_db()
+    rows = db.execute(
+        f"SELECT {', '.join(_LIST_COLS)} FROM lists WHERE reminder_next_at IS NOT NULL AND reminder_next_at <= CURRENT_TIMESTAMP"
+    ).fetchall()
+    return [_row_to_list(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Unified search (goals + lists + list items)
+# ---------------------------------------------------------------------------
+
+def search_all(query: str) -> dict:
+    """Search goals, lists, and list items. Returns categorised results."""
+    db = get_db()
+    pattern = f"%{query}%"
+
+    goal_rows = db.execute(
+        "SELECT * FROM goals WHERE name LIKE ? OR description LIKE ? ORDER BY updated_at DESC LIMIT 30",
+        [pattern, pattern],
+    ).fetchall()
+    goal_cols = [d[0] for d in db.execute("SELECT * FROM goals LIMIT 0").description]
+    goals = [dict(zip(goal_cols, r)) for r in goal_rows]
+
+    list_rows = db.execute(
+        f"SELECT {', '.join(_LIST_COLS)} FROM lists WHERE name LIKE ? ORDER BY updated_at DESC LIMIT 20",
+        [pattern],
+    ).fetchall()
+    lists_found = [_row_to_list(r) for r in list_rows]
+
+    item_rows = db.execute(
+        f"SELECT {', '.join(_ITEM_COLS)} FROM list_items WHERE content LIKE ? OR note LIKE ? ORDER BY updated_at DESC LIMIT 30",
+        [pattern, pattern],
+    ).fetchall()
+    items_found = [_row_to_item(r) for r in item_rows]
+
+    return {"goals": goals, "lists": lists_found, "list_items": items_found}

@@ -264,22 +264,23 @@ def demote_goal_api(goal_id: str, token: str = Depends(_auth)):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.post("/goals/{goal_id}/demote-to-idea")
-def demote_goal_to_idea_api(goal_id: str, token: str = Depends(_auth)):
-    """Convert a strategic goal to an idea, then delete the goal."""
-    from goalforge.vault_tools import demote_goal_to_idea
+@router.post("/goals/{goal_id}/demote-to-list")
+def demote_goal_to_list_api(goal_id: str, body: dict = None, token: str = Depends(_auth)):
+    """Convert a strategic goal to a list item, then delete the goal."""
+    from goalforge.vault_tools import demote_goal_to_list
     try:
-        return demote_goal_to_idea(goal_id)
+        list_id = (body or {}).get("list_id") or None
+        return demote_goal_to_list(goal_id, list_id=list_id)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/search")
 def search_api(q: str, token: str = Depends(_auth)):
-    """Search goals by name or description."""
+    """Unified search across goals, lists, and list items."""
     if not q or not q.strip():
         raise HTTPException(status_code=400, detail="q parameter is required")
-    return database.search_goals(q.strip())
+    return database.search_all(q.strip())
 
 
 @router.get("/goals/{goal_id}/attachments")
